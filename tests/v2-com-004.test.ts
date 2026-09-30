@@ -161,7 +161,7 @@ test('COM-004 V2 prepared and sent quote accepts once and copies its immutable s
   const sent=await x.quotes.send(quotationId,QUOTATION_TEMPLATE); assert.equal(sent.status,'SUCCEEDED',JSON.stringify(sent));
   const before=x.db.db.prepare('SELECT * FROM quotations WHERE id=?').get(quotationId) as any;
   const snapshot=JSON.parse(before.sent_snapshot_json);
-  await x.commerce.inbound({accountId:A,conversationId:C,externalMessageId:'v2-accept-inbound',type:'text',text:'OK confirm',sender:{externalId:'+6591110001',phone:'+6591110001'},occurredAt:new Date().toISOString()});
+  await x.commerce.inbound({channel:'whatsapp',accountId:A,conversationId:C,externalMessageId:'v2-accept-inbound',type:'text',text:'OK confirm',sender:{externalId:'+6591110001',phone:'+6591110001'},occurredAt:new Date().toISOString()});
   (x.commerce as any).accept({accountId:A,conversationId:C,externalMessageId:'v2-accept-inbound',type:'text',text:'OK confirm',sender:{externalId:'+6591110001',phone:'+6591110001'}},before);
   const accepted=x.db.db.prepare('SELECT status FROM quotations WHERE id=?').get(quotationId) as any;
   const acceptances=x.db.db.prepare('SELECT count(*) n FROM quotation_acceptances WHERE quotation_id=?').get(quotationId) as any;
@@ -170,7 +170,7 @@ test('COM-004 V2 prepared and sent quote accepts once and copies its immutable s
   assert.deepEqual(orders[0],{...orders[0],status:'DRAFT',source_quotation_id:quotationId});
   const lines=x.db.db.prepare('SELECT product_id,stock_code,stock_description,quantity,uom,unit_price_cents,subtotal_cents FROM sales_order_lines WHERE sales_order_id=? ORDER BY row_item_no').all(orders[0].id) as any[];
   assert.deepEqual(lines,snapshot.lines.map((line:any)=>({product_id:line.productId,stock_code:line.stockCode,stock_description:line.description,quantity:String(line.quantity),uom:line.uom,unit_price_cents:line.unitPriceCents,subtotal_cents:line.subtotalCents})));
-  await x.commerce.inbound({accountId:A,conversationId:C,externalMessageId:'v2-accept-inbound-replay',type:'text',text:'OK confirm',sender:{externalId:'+6591110001',phone:'+6591110001'},occurredAt:new Date().toISOString()});
+  await x.commerce.inbound({channel:'whatsapp',accountId:A,conversationId:C,externalMessageId:'v2-accept-inbound-replay',type:'text',text:'OK confirm',sender:{externalId:'+6591110001',phone:'+6591110001'},occurredAt:new Date().toISOString()});
   assert.equal((x.db.db.prepare('SELECT count(*) n FROM quotation_acceptances WHERE quotation_id=?').get(quotationId) as any).n,1);
   assert.equal((x.db.db.prepare('SELECT count(*) n FROM sales_orders WHERE source_quotation_id=?').get(quotationId) as any).n,1);
 });
