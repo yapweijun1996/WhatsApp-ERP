@@ -1,0 +1,25 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {buildContextSnapshot,isContextSnapshotStale,replayContextSnapshot,validateContextSnapshot} from '../src/v3-context-snapshot.js';
+
+function context(revision=4):Record<string,unknown>{return {conversationId:'conversation-1',accountId:'account-1',turnId:'turn-1',inboundMessageRef:{id:'message-1',occurredAt:'2026-09-13T00:00:00Z'},profile:{version:2,id:'profile-1'},activeQuotationSalesOrder:{salesOrder:null,quotation:{id:'quote-1'}},freshness:{fingerprint:'fresh-v1',inboundMessageId:'message-1',summaryVersion:3,workItemRevision:revision,draftRevision:null,quotationId:'quote-1',salesOrderId:null},nested:{text:'safe'}}}
+
+test('version is deterministic and independent of source key insertion order',()=>{const a=context(),b={...context()};b.freshness={...(b.freshness as object)};b.profile={...(b.profile as object)};assert.equal(buildContextSnapshot(a).contextSnapshotVersion,buildContextSnapshot(b).contextSnapshotVersion);assert.notEqual(buildContextSnapshot(a).integrityHash,'');});
+test('snapshot is detached, frozen, redaction-safe, and has no authority widening',()=>{const input=context();const snapshot=buildContextSnapshot(input);(input.nested as Record<string,string>).text='changed';assert.equal((snapshot.context.nested as Record<string,string>).text,'safe');assert.equal(Object.isFrozen(snapshot),true);assert.equal(Object.isFrozen(snapshot.context),true);assert.equal(snapshot.authority,'NON_AUTHORITATIVE_DERIVED');assert.equal('capabilities' in snapshot,false);assert.equal('postSalesOrder' in snapshot,false);assert.throws(()=>((snapshot.context.nested as Record<string,string>).text='mutate'),TypeError);const redacted=buildContextSnapshot({...context(),nested:{text:'api_key=raw Bearer abcdefghijklmnop'}});assert.equal(JSON.stringify(redacted).includes('raw'),false);});
+test('replay validation succeeds and tampering fails closed',()=>{const snapshot=buildContextSnapshot(context());assert.equal(validateContextSnapshot(snapshot).contextSnapshotVersion,snapshot.contextSnapshotVersion);assert.deepEqual(replayContextSnapshot(snapshot,context()),{snapshot,stale:false,equal:true});const tampered=JSON.parse(JSON.stringify(snapshot));tampered.context.nested.text='tampered';assert.throws(()=>validateContextSnapshot(tampered),/V3_CONTEXT_SNAPSHOT_INVALID/);});
+test('source revision changes produce a different version and stale replay',()=>{const snapshot=buildContextSnapshot(context());const changed=context(5);const next=buildContextSnapshot(changed);assert.notEqual(next.contextSnapshotVersion,snapshot.contextSnapshotVersion);assert.equal(isContextSnapshotStale(snapshot,changed),true);assert.equal(replayContextSnapshot(snapshot,changed).equal,false);});
+test('building is pure and rejects invalid source shapes',()=>{const input=context();const before=JSON.stringify(input);buildContextSnapshot(input);assert.equal(JSON.stringify(input),before);assert.throws(()=>buildContextSnapshot({...input,freshness:{...(input.freshness as object),fingerprint:undefined}}),/V3_CONTEXT_SNAPSHOT_INVALID/);});
+test('accessors are rejected without invoking getters during build, validation, or replay',()=>{
+ const input=context();let buildCalls=0;Object.defineProperty(input,'nested',{enumerable:true,get(){buildCalls++;return {text:'unsafe'}}});assert.throws(()=>buildContextSnapshot(input),/V3_CONTEXT_SNAPSHOT_INVALID/);assert.equal(buildCalls,0);
+ const snapshot=buildContextSnapshot(context());const supplied=JSON.parse(JSON.stringify(snapshot));let validationCalls=0;Object.defineProperty(supplied.context,'nested',{enumerable:true,get(){validationCalls++;return {text:'unsafe'}}});
+ assert.throws(()=>validateContextSnapshot(supplied),/V3_CONTEXT_SNAPSHOT_INVALID/);assert.throws(()=>replayContextSnapshot(supplied,context()),/V3_CONTEXT_SNAPSHOT_INVALID/);assert.equal(validationCalls,0);
+});
+test('profile version is required and positive',()=>{
+ for(const version of [null,0,-1,1.5,Number.MAX_SAFE_INTEGER+1,'2']){const invalid=context();(invalid.profile as Record<string,unknown>).version=version;assert.throws(()=>buildContextSnapshot(invalid),/V3_CONTEXT_SNAPSHOT_INVALID:PROFILE_VERSION/);}
+ const snapshot=buildContextSnapshot(context());const invalid=JSON.parse(JSON.stringify(snapshot));invalid.context.profile.version=null;assert.throws(()=>validateContextSnapshot(invalid),/V3_CONTEXT_SNAPSHOT_INVALID:PROFILE_VERSION/);
+});
+test('validation detaches and freezes without mutating supplied input',()=>{
+ const supplied=JSON.parse(JSON.stringify(buildContextSnapshot(context())));const validated=validateContextSnapshot(supplied);
+ assert.equal(Object.isFrozen(supplied),false);assert.equal(Object.isFrozen(supplied.context),false);assert.notStrictEqual(validated,supplied);assert.notStrictEqual(validated.context,supplied.context);assert.equal(Object.isFrozen(validated),true);assert.equal(Object.isFrozen(validated.context),true);
+ supplied.context.nested.text='changed';assert.equal((validated.context.nested as Record<string,string>).text,'safe');
+});

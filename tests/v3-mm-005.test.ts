@@ -1,0 +1,47 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {V1Database} from '../src/database.js';
+import {V2QueueService} from '../src/v2-queue.js';
+import {buildInboundBundle} from '../src/v3-inbound-bundle.js';
+import {buildContextSnapshot} from '../src/v3-context-snapshot.js';
+import {buildV3FreshnessVectorFromDatabase, buildV3FreshnessVector, type V3FreshnessVectorInput} from '../src/v3-freshness-vector.js';
+import {buildConversationGoal} from '../src/v3-conversation-goal.js';
+import {V3GoalProposalHost} from '../src/v3-goal-proposal.js';
+import {buildV3DurableContinuation, V3DurableContinuationStore, v3FreshnessVectorRef, v3ResumeConditionRef} from '../src/v3-durable-continuation.js';
+import {buildV3AttachmentExtractionHostEvent, processV3AttachmentExtractionHostEvent, attachmentExtractionResumeCondition} from '../src/v3-attachment-completion.js';
+
+const scope = {accountId: 'demo-account', conversationId: 'conv-001'} as const;
+function baseInput(messageId: string): Omit<V3FreshnessVectorInput, 'authoritativeV2FreshnessFingerprint'> { return {identityScope: {...scope, customerId: 'CUST-001', channelAccountId: scope.accountId}, employeeProfile: {id: 'sales-digital-employee', version: 1}, capabilityPolicy: {policyVersion: 1, availableCapabilities: []}, workItemOrderDraftRefs: {workItem: null, orderDraft: null}, canonicalBusiness: {quotations: [], acceptances: [], outbound: [], salesOrders: []}, relevantErpEvidence: [], goalGraph: {version: null, dependencyRefs: []}, attachmentExtraction: {version: 1, dependencyRefs: [{id: 'attachment:one', version: 1}]}, retentionAccess: {version: 1, dependencyRefs: []}, conversationBundle: {conversationRevision: 0, bundleRevision: 0, messageRefs: [{id: messageId, version: 1}]}}; }
+function fixture() {
+  const database = new V1Database(':memory:'); database.resetAndSeed(); const queue = new V2QueueService(database);
+  const inbound = queue.enqueueInbound({...scope, externalMessageId: 'mm005-inbound', occurredAt: '2030-01-01T00:00:00.000Z', text: 'attachment pending'});
+  const bundle = buildInboundBundle(database.db, {...scope, messageIds: [inbound.messageId], bundleRevision: 1, hardCapAt: '2030-01-01T00:00:03.000Z', closedAt: '2030-01-01T00:00:01.000Z', closeReason: 'QUIET_WINDOW'});
+  database.db.prepare("INSERT INTO work_items(id,account_id,conversation_id,customer_id,type,state,revision,goal_summary,source_message_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)").run('mm005-wi', scope.accountId, scope.conversationId, 'CUST-001', 'SALES_ORDER_REQUEST', 'DRAFTING', 1, 'async attachment', inbound.messageId, '2030-01-01T00:00:00.000Z', '2030-01-01T00:00:00.000Z');
+  const goal = buildConversationGoal({goalId: 'mm005-goal', ...scope, sourceMessageIds: [inbound.messageId], sourceAttachmentIds: ['attachment-one'], erpObjectRefs: [], parentGoalId: null, dependsOnGoalIds: [], relatedGoalIds: [], description: 'async attachment', status: 'OPEN', createdBy: 'AGENT', createdAt: '2030-01-01T00:00:00.000Z', updatedAt: '2030-01-01T00:00:00.000Z', fulfillmentEvidenceRefs: []});
+  new V3GoalProposalHost(database).admit({scope, operation: 'CREATE', expected: {goalId: null, revision: null, status: null}, goal}, {proposalId: 'mm005-goal', idempotencyKey: 'mm005-goal', createdAt: '2030-01-01T00:00:00.000Z'});
+  new V3GoalProposalHost(database).admit({scope, operation: 'UPDATE', expected: {goalId: goal.goalId, revision: 1, status: 'OPEN'}, goal: {...goal, status: 'WAITING_EXTERNAL', updatedAt: '2030-01-01T00:00:01.000Z'}}, {proposalId: 'mm005-goal-update', idempotencyKey: 'mm005-goal-update', createdAt: '2030-01-01T00:00:01.000Z'});
+  const oldVector = buildV3FreshnessVectorFromDatabase(database.db, baseInput(inbound.messageId));
+  const fingerprint = oldVector.dependencies.authoritativeV2FreshnessFingerprint;
+  const context = buildContextSnapshot({accountId: scope.accountId, conversationId: scope.conversationId, turnId: 'mm005-turn', inboundMessageRef: {id: inbound.messageId, occurredAt: '2030-01-01T00:00:00.000Z'}, profile: {id: 'sales-digital-employee', version: 1}, activeQuotationSalesOrder: {quotation: null, salesOrder: null}, freshness: {fingerprint, inboundMessageId: inbound.messageId, summaryVersion: null, workItemRevision: null, draftRevision: null, quotationId: null, salesOrderId: null}});
+  const currentVector = buildV3FreshnessVector({...oldVector.dependencies, attachmentExtraction: {version: 2, dependencyRefs: [{id: 'attachment:one', version: 2}]}});
+  const event = buildV3AttachmentExtractionHostEvent(oldVector, currentVector, {accountId: scope.accountId, conversationId: scope.conversationId, attachmentId: 'attachment-one', sourceMessageId: inbound.messageId, sourceRef: 'media://one', sourceFingerprint: 'a'.repeat(64), extractionVersion: 'ocr-v2', extractionDependencyId: 'attachment:one', extractionDependencyVersion: 2, outcome: 'COMPLETED', occurredAt: '2030-01-01T00:00:02.000Z'});
+  const condition = {accountId: scope.accountId, conversationId: scope.conversationId, resumeTriggerType: 'EXTRACTION_VERSION' as const, condition: attachmentExtractionResumeCondition(event)};
+  const continuation = buildV3DurableContinuation({continuationId: 'mm005-continuation', workItemId: 'mm005-wi', goalId: 'mm005-goal', ...scope, disposition: 'WAITING_EXTERNAL', ownerType: 'HOST', ownerId: 'host', state: 'WAITING', resumeTriggerType: condition.resumeTriggerType, resumeConditionRef: v3ResumeConditionRef(condition), nextEligibleAt: null, deadlineAt: '2030-01-02T00:00:00.000Z', expectedFreshnessVectorRef: v3FreshnessVectorRef(currentVector), lastEvidenceRefs: [], lastEffectRefs: [], attempt: 0, budgetState: {maxAttempts: 2, consumed: 0, deadlineAt: '2030-01-02T00:00:00.000Z'}, idempotencyKey: 'mm005-continuation', createdAt: '2030-01-01T00:00:00.000Z', updatedAt: '2030-01-01T00:00:00.000Z'});
+  new V3DurableContinuationStore(database).create(continuation, currentVector, condition);
+  return {database, bundle, context, oldVector, currentVector, event, continuation};
+}
+function candidate(f: ReturnType<typeof fixture>, continuationId = f.continuation.continuationId) { return {continuationId, ownerId: 'worker', bundle: f.bundle, context: f.context}; }
+
+test('MM-005 completion wakes an eligible continuation without a new inbound and is replay-safe', () => {
+  const f = fixture(); const first = processV3AttachmentExtractionHostEvent(f.database, f.event, f.currentVector, [candidate(f)]); assert.equal(first.freshnessAdvanced, true); assert.equal(first.decisions[0]?.disposition, 'RESUME_AUTHORIZED'); assert.equal((f.database.db.prepare("SELECT count(*) AS n FROM v2_conversation_inbox WHERE lease_owner IS NOT NULL").get() as {n: number}).n, 1);
+  const duplicate = processV3AttachmentExtractionHostEvent(f.database, f.event, f.currentVector, [candidate(f)]); assert.equal(duplicate.decisions[0]?.reasonCode, 'DUPLICATE_WAKE'); assert.equal((f.database.db.prepare("SELECT count(*) AS n FROM v3_continuation_wake_events WHERE event_type='ATTEMPT_RESERVED'").get() as {n: number}).n, 1);
+});
+
+test('MM-005 exact attachment/scope and trigger condition prevent unrelated wake', () => {
+  const f = fixture(); assert.throws(() => processV3AttachmentExtractionHostEvent(f.database, {...f.event, accountId: 'other'}, f.currentVector, [candidate(f)]), /EVENT_ID|VECTOR_SCOPE/); assert.throws(() => processV3AttachmentExtractionHostEvent(f.database, f.event, f.currentVector, [{...candidate(f), continuationId: 'missing'}]), /CONTINUATION_NOT_FOUND/); assert.equal((f.database.db.prepare("SELECT count(*) AS n FROM v3_continuation_wake_events").get() as {n: number}).n, 0);
+});
+
+test('MM-005 invalidation advances freshness but never resumes stale evidence', () => {
+  const f = fixture(); const invalidated = buildV3AttachmentExtractionHostEvent(f.oldVector, f.currentVector, {...f.event, outcome: 'INVALIDATED'}); assert.notEqual(invalidated.eventId, f.event.eventId); const result = processV3AttachmentExtractionHostEvent(f.database, invalidated, f.currentVector, [candidate(f)]); assert.equal(result.freshnessAdvanced, true); assert.deepEqual(result.decisions, []); assert.equal((f.database.db.prepare("SELECT count(*) AS n FROM v3_continuation_wake_events").get() as {n: number}).n, 0); });
+
+test('MM-005 terminal continuation is not resumed and has no outbound/business side effect', () => { const f = fixture(); new V3GoalProposalHost(f.database).admit({scope, operation: 'UPDATE', expected: {goalId: f.continuation.goalId, revision: 2, status: 'WAITING_EXTERNAL'}, goal: {...buildConversationGoal({goalId: f.continuation.goalId, ...scope, sourceMessageIds: [f.bundle.messageIds[0]!], sourceAttachmentIds: ['attachment-one'], erpObjectRefs: [], parentGoalId: null, dependsOnGoalIds: [], relatedGoalIds: [], description: 'terminal', status: 'FULFILLED', createdBy: 'AGENT', createdAt: '2030-01-01T00:00:00.000Z', updatedAt: '2030-01-01T00:00:03.000Z', fulfillmentEvidenceRefs: []})}}, {proposalId: 'mm005-terminal', idempotencyKey: 'mm005-terminal', createdAt: '2030-01-01T00:00:03.000Z'}); const result = processV3AttachmentExtractionHostEvent(f.database, f.event, f.currentVector, [candidate(f)]); assert.equal(result.decisions[0]?.reasonCode, 'NOT_ELIGIBLE'); assert.equal((f.database.db.prepare("SELECT count(*) AS n FROM v3_continuation_wake_events").get() as {n: number}).n, 0); assert.equal((f.database.db.prepare("SELECT count(*) AS n FROM v2_conversation_inbox WHERE lease_owner IS NOT NULL").get() as {n: number}).n, 0); });

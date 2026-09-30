@@ -1,0 +1,55 @@
+**VERDICT: PASS_WITH_REQUIRED_FIXES**
+
+The architecture respects the approved AI cutoff at `SALES_ORDER.DRAFT`, but is not ready to be frozen for implementation. Several required guarantees lack enforceable state, persistence, or authorization contracts.
+
+Reviewed `AGENTS.md`, `DESIGN.md`, `README.md`, and all 12 `docs/*.md` files. No files modified. Findings concern the documented design, not demonstrated implementation defects.
+
+**P0 — None identified.** No document explicitly authorizes AI posting, confirmation, or DO creation.
+
+**P1 — Required fixes before implementation sign-off**
+
+1. **Quotation lifecycle has conflicting branches and incomplete guards.**  
+   [DESIGN.md:7](/srv/agent-workstation/workspaces/whatsapp-erp-order-intelligence/DESIGN.md:7) visually routes `ACCEPTED|REJECTED|EXPIRED` into Draft SO, while [DATABASE.md:29](/srv/agent-workstation/workspaces/whatsapp-erp-order-intelligence/docs/DATABASE.md:29) permits only accepted quotations. [SPEC.md:9](/srv/agent-workstation/workspaces/whatsapp-erp-order-intelligence/docs/SPEC.md:9) omits rejection and expiry altogether. “Active quotation,” replacement, and edits after sending are undefined.  
+   **Remediation:** Publish one transition table defining permitted actors, guards, terminal states, expiry timing, and replacement behavior. Only an eligible `SENT` quotation may become accepted; only accepted quotations may generate Draft SO. Define at most one acceptance-eligible quote per conversation, or require explicit disambiguation. Test rejected, expired, replaced, and concurrently accepted quotes.
+
+2. **The staff boundary lacks a trusted authorization mechanism and downstream transition contract.**  
+   [PI_AGENT_TOOLS.md:24](/srv/agent-workstation/workspaces/whatsapp-erp-order-intelligence/docs/PI_AGENT_TOOLS.md:24) removes forbidden tools, and [DATABASE.md:30](/srv/agent-workstation/workspaces/whatsapp-erp-order-intelligence/docs/DATABASE.md:30) checks an AI actor, but neither defines how actor identity becomes trustworthy. [UI_SCREENS.md:23](/srv/agent-workstation/workspaces/whatsapp-erp-order-intelligence/docs/UI_SCREENS.md:23) specifies only a Post action; [DEMO_STORYLINE.md:29](/srv/agent-workstation/workspaces/whatsapp-erp-order-intelligence/docs/DEMO_STORYLINE.md:29) subsequently advances confirmation and DO readiness without specifying their triggers.  
+   **Remediation:** Define server-enforced staff authorization using a trusted session or capability, independent of request-supplied actor labels. Specify staff-triggered `DRAFT → POSTED → CONFIRMED → DO_READY` transitions and record the required customer double-confirmation before posting. Test direct API bypass, forged actors, skipped states, and all forbidden AI operations—not just posting. A minimal demo authorization mechanism suffices.
+
+3. **Acceptance cannot yet be reliably bound to the correct sender and quote.**  
+   [GO_CONTRACT.md:36](/srv/agent-workstation/workspaces/whatsapp-erp-order-intelligence/docs/GO_CONTRACT.md:36) requires evidence bound to the active sent quote, but [CHANNEL_ADAPTER.md:5](/srv/agent-workstation/workspaces/whatsapp-erp-order-intelligence/docs/CHANNEL_ADAPTER.md:5) lacks inbound reply correlation. [DATABASE.md:8](/srv/agent-workstation/workspaces/whatsapp-erp-order-intelligence/docs/DATABASE.md:8) does not persist sender identity, and its customer-channel identity table lacks account scope. An old “OK confirm” arriving after a replacement quote is therefore underspecified.  
+   **Remediation:** Persist the normalized sender and account context, optional reply reference, and quote-specific acceptance evidence. Commerce must validate customer/conversation ownership, eligible quote identity, message ordering, and explicit intent. Define safe clarification when correlation is ambiguous. Test wrong-customer evidence, delayed replies, quoted acceptance text, and “Yes please” meaning permission to prepare a quote.
+
+4. **Retries and crashes can produce duplicate or incomplete commercial records.**  
+   [PI_AGENT_TOOLS.md:19](/srv/agent-workstation/workspaces/whatsapp-erp-order-intelligence/docs/PI_AGENT_TOOLS.md:19) exposes acceptance and Draft SO creation as separate mutations. [DATABASE.md:18](/srv/agent-workstation/workspaces/whatsapp-erp-order-intelligence/docs/DATABASE.md:18) defines neither uniqueness constraints nor transaction/recovery semantics. A crash between those calls can leave an accepted quote without its automatic Draft SO; duplicate messages or tool retries can create multiple drafts.  
+   **Remediation:** Define scoped inbound deduplication, idempotent commerce mutations, and one Draft SO per accepted quote. Commit acceptance evidence, Draft SO, and audit atomically, or specify durable recovery with equivalent guarantees. Test duplicate delivery, concurrent calls, and failure between writes.
+
+5. **`SENT` has no defined relationship to actual channel submission.**  
+   [CHANNEL_ADAPTER.md:29](/srv/agent-workstation/workspaces/whatsapp-erp-order-intelligence/docs/CHANNEL_ADAPTER.md:29) lists `send(message)` without a result or error contract. [DEMO_STORYLINE.md:20](/srv/agent-workstation/workspaces/whatsapp-erp-order-intelligence/docs/DEMO_STORYLINE.md:20) immediately marks the quotation sent, while [DATABASE.md:18](/srv/agent-workstation/workspaces/whatsapp-erp-order-intelligence/docs/DATABASE.md:18) stores only `sent_at`. Failure or timeout after provider submission has no specified outcome. This also leaves provider-specific delivery behavior likely to leak into commerce.  
+   **Remediation:** Define provider-neutral submission outcomes, outbound correlation IDs, durable send attempts, and retry rules. State exactly what `SENT` means; an uncertain result must not silently become success or trigger blind resending. Link the outbound message to the exact quote snapshot. Test failure before submission and timeout after submission.
+
+6. **Immutable references do not guarantee immutable commercial evidence.**  
+   [DESIGN.md:17](/srv/agent-workstation/workspaces/whatsapp-erp-order-intelligence/DESIGN.md:17) promises immutable source references, but [DATABASE.md:18](/srv/agent-workstation/workspaces/whatsapp-erp-order-intelligence/docs/DATABASE.md:18) does not freeze quotation contents or connect them to originating messages and ERP lookup evidence. Acceptance evidence is explicitly linked only from the SO. Generic `evidence_ref` and `payload_json` fields do not define the promised provenance chain.  
+   **Remediation:** Freeze sent/accepted quotation content and copy the accepted snapshot into Draft SO without repricing. Define durable links to source messages, outbound quote, acceptance, relevant ERP evidence, source lines, and staff actions. Define evidence payload schemas and prohibit deletion or mutation that breaks those links. Test that later ERP price/description changes cannot rewrite historical documents.
+
+7. **ERP validity has no time or stock-consumption policy.**  
+   [DESIGN.md:15](/srv/agent-workstation/workspaces/whatsapp-erp-order-intelligence/DESIGN.md:15) permits sending when stock and price are valid. [DATABASE.md:17](/srv/agent-workstation/workspaces/whatsapp-erp-order-intelligence/docs/DATABASE.md:17) includes price validity dates, but nothing defines validity across preparation, sending, acceptance, and staff posting. [ERP_DEMO_DATASET.md:24](/srv/agent-workstation/workspaces/whatsapp-erp-order-intelligence/docs/ERP_DEMO_DATASET.md:24) says the request “leaves 1 CTN,” without identifying any stock reservation or deduction event.  
+   **Remediation:** Specify when validation occurs, how long quoted prices hold, and whether demo stock is informational or mutated at a defined staff operation. Preserve accepted prices; expose stock changes for staff review under an explicit policy. No reservation subsystem is necessary. Test expiry, changed stock, and repeated orders against the same balance.
+
+**P2 — Clarifications needed for consistent implementation and demo proof**
+
+8. **The delivery question is never answered or represented precisely.**  
+   [DEMO_STORYLINE.md:7](/srv/agent-workstation/workspaces/whatsapp-erp-order-intelligence/docs/DEMO_STORYLINE.md:7) asks about tomorrow’s delivery; the response at [line 17](/srv/agent-workstation/workspaces/whatsapp-erp-order-intelligence/docs/DEMO_STORYLINE.md:17) addresses stock only. The schema nevertheless includes `delivery_date`.  
+   **Remediation:** Treat this as a requested date pending staff confirmation, say so in the demo response, and define the timezone/reference timestamp for “tomorrow.” Do not add delivery scheduling.
+
+9. **Deterministic arithmetic is required but its rules are unspecified.**  
+   [GO_CONTRACT.md:35](/srv/agent-workstation/workspaces/whatsapp-erp-order-intelligence/docs/GO_CONTRACT.md:35) requires deterministic totals and conversion; [DATABASE.md:31](/srv/agent-workstation/workspaces/whatsapp-erp-order-intelligence/docs/DATABASE.md:31) specifies decimal calculations without precision, rounding, quantity validation, or tax rules.  
+   **Remediation:** Define decimal storage, currency precision, rounding order, allowed quantity/UOM granularity, and tax defaults. Explicitly reject invalid quantities and unavailable conversions. The documented SGD 662.50 subtotal is correct; make the seeded tax configuration equally definite.
+
+10. **The Golden storyline is not fully reproducible from the specified seed.**  
+    [ERP_DEMO_DATASET.md:19](/srv/agent-workstation/workspaces/whatsapp-erp-order-intelligence/docs/ERP_DEMO_DATASET.md:19) supplies an undated previous order, while [DEMO_STORYLINE.md:20](/srv/agent-workstation/workspaces/whatsapp-erp-order-intelligence/docs/DEMO_STORYLINE.md:20) expects exact document numbers. [GO_CONTRACT.md:47](/srv/agent-workstation/workspaces/whatsapp-erp-order-intelligence/docs/GO_CONTRACT.md:47) specifies a simulated channel but no deterministic gateway behavior.  
+    **Remediation:** Specify a fixed clock, dated order history, number-sequence seeds, reset behavior, and scripted gateway responses for automated Golden tests. Exercise real commerce services and persistence. Keep a live gateway smoke separate from deterministic proof.
+
+11. **The inbound media contract exceeds the documented V1 processing scope.**  
+    [CHANNEL_ADAPTER.md:11](/srv/agent-workstation/workspaces/whatsapp-erp-order-intelligence/docs/CHANNEL_ADAPTER.md:11) accepts image/audio/document messages with optional text and opaque media references; [ROADMAP.md:7](/srv/agent-workstation/workspaces/whatsapp-erp-order-intelligence/docs/ROADMAP.md:7) defers media/voice normalization. Unsupported-message handling is undefined.  
+    **Remediation:** Explicitly limit V1 interpretation to supported text content. Preserve unsupported-message metadata, request a text restatement, and prevent unsupported input from accepting quotes or creating documents. Keep provider media resolution inside the adapter; no V1 transcription feature is required.
