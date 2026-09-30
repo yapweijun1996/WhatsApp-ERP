@@ -1,0 +1,20 @@
+node_modules/
+dist/
+test-results/
+playwright-report/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+.env
+.env.*
+!.env.example
+.data/
+# Channel session credentials. .data/ already covers the default WHATSAPP_AUTH_DIR;
+# these also fence an auth dir pointed somewhere else, plus stray runtime logs.
+whatsapp-auth*/
+**/whatsapp-auth*/
+*.log
