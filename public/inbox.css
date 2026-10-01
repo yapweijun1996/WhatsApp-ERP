@@ -10,3 +10,5 @@
 
 /* Local coherent SVG set; decorative graphics inherit the control label. */
 .ui-icon{display:inline-block;width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;vertical-align:middle;flex-shrink:0}.icon-button{display:inline-flex;align-items:center;justify-content:center}.nav-item>.ui-icon{width:24px;height:24px}.notice>.ui-icon{width:23px;height:23px}.search>.ui-icon{width:16px;height:16px}summary{list-style:none}summary::-webkit-details-marker{display:none}summary>.ui-icon{width:14px;height:14px;margin-right:5px;transition:transform .15s}details[open]>summary>.ui-icon{transform:rotate(90deg)}@media(prefers-reduced-motion:reduce){summary>.ui-icon{transition:none}}
+
+.print-link{display:block;color:var(--teal);font-size:12px;padding:8px 0 16px;text-underline-offset:3px}

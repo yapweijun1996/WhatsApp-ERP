@@ -1,0 +1,43 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtempSync,rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {V1Database} from '../src/database.js';
+import {CommerceService} from '../src/commerce.js';
+import {SimulatedChannel} from '../src/channels.js';
+import {ConversationIngressPersistence} from '../src/v2-conversation-ingress-persistence.js';
+import {V2QueueService} from '../src/v2-queue.js';
+import {WorkspaceMigrationService} from '../src/v2-workspace-migration.js';
+import {createMigrationApprovalAuthority} from '../src/migration-auth.js';
+import {issueBoundMigrationApproval} from './migration-approval-helper.js';
+import {V2TransportRuntime} from '../src/v2-transport-runtime.js';
+import {deriveAgentDecisionIdentity} from '../src/v2-transport-contract-helpers.js';
+import {V2CapabilityExecutor} from '../src/v2-capability-executor.js';
+import {createStaffCapabilityAuthority} from '../src/staff-auth.js';
+import {createApp} from '../src/app.js';
+
+test('isolated canonical identity -> structured V2 tools -> validated quote -> acceptance -> draft -> staff audit/print survives restart',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'waerp-journey-')),file=join(dir,'synthetic.sqlite');const authority=createMigrationApprovalAuthority(),staffAuthority=createStaffCapabilityAuthority();let db=new V1Database(file,authority);db.resetAndSeed();const channel=new SimulatedChannel();await channel.connect();
+ try{
+  const binding=db.db.prepare('SELECT channel_account_id,external_id,customer_id FROM customer_channel_identities LIMIT 1').get() as any;assert.ok(binding);
+  const input={accountId:binding.channel_account_id,conversationId:'synthetic-journey-external',externalMessageId:'journey-order',channel:'whatsapp' as const,sender:{externalId:binding.external_id},type:'text' as const,text:'Synthetic order: one carton ayam',occurredAt:new Date().toISOString()};
+  const canonical=new ConversationIngressPersistence(db).resolve(input)!;assert.equal(canonical.customerId,binding.customer_id);const scope={accountId:canonical.message.accountId,conversationId:canonical.message.conversationId,customerId:canonical.customerId!};
+  const migration=new WorkspaceMigrationService(db,authority);const shadow=migration.shadowImport({...scope,idempotencyKey:'journey-shadow',approval:issueBoundMigrationApproval(authority,migration,'synthetic-owner','MIGRATION_OWNER','SHADOW_IMPORT',scope)});
+  migration.promoteCanary({...scope,expectedLegacySourceHash:shadow.sourceHash!,expectedWorkItemId:null,expectedDraftRevision:null,idempotencyKey:'journey-promote',approval:issueBoundMigrationApproval(authority,migration,'synthetic-owner','V1_OWNER','PROMOTE_CANARY',scope,{expectedHash:shadow.sourceHash!,expectedWorkItemId:null,expectedDraftRevision:null})});
+  const commerce=new CommerceService(db,channel,staffAuthority.verify),executor=new V2CapabilityExecutor(db,commerce),queue=new V2QueueService(db);
+  const enqueue=(m:typeof canonical.message)=>queue.enqueueInbound({accountId:m.accountId,conversationId:m.conversationId,externalMessageId:m.externalMessageId,occurredAt:m.occurredAt,messageType:m.type,text:m.text,senderExternalId:m.sender.externalId});
+  const first=enqueue(canonical.message);const work=()=>db.db.prepare('SELECT * FROM work_items WHERE account_id=? AND conversation_id=?').get(scope.accountId,scope.conversationId) as any;const draft=()=>db.db.prepare('SELECT * FROM order_drafts WHERE account_id=? AND conversation_id=?').get(scope.accountId,scope.conversationId) as any;
+  const turnStart=(messageId:string)=>({accountId:scope.accountId,conversationId:scope.conversationId,inboundMessageId:messageId,profileId:'sales-digital-employee',nowIso:new Date().toISOString(),timezone:'Asia/Singapore'});
+  // Scripted semantic decisions exercise the production host coordinator/executor;
+  // no paid model or real provider is used, and fixture authority is local only.
+  const decisions=[()=>['get_customer_context',scope],()=>['get_or_create_work_item',{...scope,goalSummary:'Synthetic carton order'}],()=>['create_order_draft',{...scope,workItemId:work().id,expectedWorkItemRevision:work().revision,warehouseId:'SG-MAIN',currency:'SGD',lines:[{lineNo:1,requestedWording:'ayam',quantity:'1',requestedUom:'CTN'}]}],()=>['validate_order_draft',{...scope,workItemId:work().id,draftId:draft().id,revision:draft().current_revision,expectedWorkItemRevision:work().revision}],()=>['prepare_quotation',{...scope,workItemId:work().id,draftId:draft().id,draftRevision:draft().current_revision,expectedWorkItemRevision:work().revision}],()=>['send_quotation',{...scope,quotationId:(db.db.prepare('SELECT id FROM quotations WHERE source_conversation_id=?').get(scope.conversationId) as any).id,customerMessage:'Review quotation {{quotation_number}} in {{currency}} {{total}}.'}]];
+  let step=0;const transport={mode:'demo',id:'synthetic-journey-decisions',decide:async(o:any)=>{const next=decisions[step++];const base={turnId:o.turnId,sequence:o.sequence,...deriveAgentDecisionIdentity(o.turnId,o.sequence)};if(next){const [capabilityName,args]=next();return{kind:'tool_call',...base,capabilityName,capabilityVersion:'v1',arguments:args}}return{kind:'final_response',...base,responsePlan:{turnId:o.turnId,intent:'ACKNOWLEDGE',connectiveText:'Thank you.',factClaims:[],outboundPurpose:'acknowledgement'}}}} as any;
+  const result=await new V2TransportRuntime(db,{transport,execute:a=>executor.execute(a)}).run(turnStart(first.item.messageId));assert.equal(result.status,'TERMINAL',String(result.reasonCode));const quote=commerce.state(scope.conversationId).quote;assert.equal(quote?.status,'SENT');assert.equal(quote?.total,48);assert.equal(quote?.lines[0].unitPrice,48);assert.equal(channel.sendCount,1);assert.equal(quote?.lines[0].quantity,1);
+  const acceptance=enqueue({...canonical.message,externalMessageId:'journey-accept',text:'OK confirm.',occurredAt:new Date(Date.now()+2000).toISOString()});let accepted=false;
+  const acceptTransport={mode:'demo',id:'synthetic-journey-accept',decide:async(o:any)=>{const base={turnId:o.turnId,sequence:o.sequence,...deriveAgentDecisionIdentity(o.turnId,o.sequence)};if(!accepted){accepted=true;return{kind:'tool_call',...base,capabilityName:'record_customer_commitment',capabilityVersion:'v1',arguments:{...scope,inboundMessageId:acceptance.item.messageId,commitment:'ACCEPT'}}}return{kind:'final_response',...base,responsePlan:{turnId:o.turnId,intent:'ACKNOWLEDGE',connectiveText:'Thank you.',factClaims:[],outboundPurpose:'acknowledgement'}}}} as any;
+  await new V2TransportRuntime(db,{transport:acceptTransport,execute:a=>executor.execute(a)}).run(turnStart(acceptance.item.messageId));const so=commerce.state(scope.conversationId).so;assert.equal(so?.status,'DRAFT');assert.equal((db.db.prepare('SELECT count(*) n FROM quotation_acceptances').get() as any).n,1);assert.throws(()=>commerce.staff('post','forged' as any,'bad','confirmed',so.no),/STAFF_AUTH_REQUIRED/);const capability=staffAuthority.issue('synthetic-reviewer');assert.throws(()=>commerce.staff('post',capability,'missing-evidence',undefined,so.no),/DOUBLE_CONFIRMATION_REQUIRED/);commerce.staff('post',capability,'authorized-post','Synthetic reviewer reconfirmed exact order',so.no);commerce.staff('post',capability,'authorized-post','Synthetic reviewer reconfirmed exact order',so.no);assert.equal((db.db.prepare('SELECT count(*) n FROM staff_actions').get() as any).n,1);
+  db.db.close();const saved={...process.env};process.env.ORDER_CHANNEL='simulated';process.env.DEMO_GPT_ENABLED='false';process.env.V2_CANARY_RUNTIME_ENABLED='false';const opened=createApp({dbFilename:file,startupMode:'paused'});
+  try{const state=(await opened.app.inject('/api/state?conversationId='+encodeURIComponent(scope.conversationId))).json();assert.equal(state.so.status,'POSTED');assert.equal(state.conversation.customerId,binding.customer_id);const print=await opened.app.inject('/api/print?conversationId='+encodeURIComponent(scope.conversationId));assert.equal(print.statusCode,200);assert.match(print.body,new RegExp(so.no));assert.match(print.body,/POSTED/);assert.equal((await opened.app.inject('/api/print?conversationId=wrong-account-id')).statusCode,404);assert.equal((await opened.app.inject({method:'POST',url:'/api/staff/post',payload:{salesOrderNo:so.no}})).statusCode,503);assert.equal(channel.sendCount,1);assert.equal((opened.service.database.db.prepare('pragma integrity_check').get() as any).integrity_check,'ok')}finally{await opened.app.close();opened.service.database.db.close();process.env=saved}
+ }finally{try{db.db.close()}catch{}await channel.disconnect();rmSync(dir,{recursive:true,force:true})}
+});

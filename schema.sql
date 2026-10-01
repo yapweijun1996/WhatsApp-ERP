@@ -681,3 +681,11 @@ CREATE TABLE IF NOT EXISTS prospect_catalog_evidence(
   UNIQUE(account_id, external_message_id, call_seq)
 );
 CREATE INDEX IF NOT EXISTS prospect_catalog_evidence_scope_idx ON prospect_catalog_evidence(account_id, conversation_id, observed_at);
+
+-- Single durable prospect processing claim. UNKNOWN includes crash-after-send
+-- ambiguity and must never be automatically replayed without provider evidence.
+CREATE TABLE IF NOT EXISTS prospect_reply_delivery(
+ account_id TEXT NOT NULL,external_message_id TEXT NOT NULL,conversation_id TEXT NOT NULL,
+ client_message_id TEXT NOT NULL UNIQUE,state TEXT NOT NULL CHECK(state IN ('CLAIMED','UNKNOWN','SUBMITTED','SUPPRESSED')),
+ updated_at TEXT NOT NULL,PRIMARY KEY(account_id,external_message_id)
+);

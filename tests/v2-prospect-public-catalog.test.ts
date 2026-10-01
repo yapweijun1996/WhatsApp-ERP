@@ -60,6 +60,9 @@ const at = (offsetMs: number) => new Date(BASE_MS + offsetMs).toISOString();
 /** Listing-style query in Chinese: "what do you sell". Never regex-matched by the host. */
 const ZH_LISTING = '你卖什么';
 
+// Explicit synthetic prospect reply authorization; never used in real runtime.
+const TEST_PROSPECT_SCOPES=["conv-001", "conv-prospect-catalog", "conv-prospect-catalog-b", "convertUom"].map(externalConversationId=>({accountId:"demo-account",externalConversationId}));
+
 function makeMsg(override: Partial<IncomingChannelMessage> = {}): IncomingChannelMessage {
   const sender = override.sender?.externalId ?? SENDER;
   return {
@@ -96,7 +99,9 @@ function makeHarness(prospectModel?: ProspectModelCaller) {
   const sent: { conversationId: string; text: string }[] = [];
   const router = new V2CanaryIngressRouter(db, new CommerceService(db), new V2RolloutService(db), {
     enabled: true,
-    outbound: { send: async (m: any) => { sent.push({ conversationId: m.conversationId, text: m.text }); } } as any,
+    prospectReplyScopes:TEST_PROSPECT_SCOPES,
+
+    outbound: { send: async (m: any) => { sent.push({ conversationId: m.conversationId, text: m.text }); return {status:'submitted',externalMessageId:'synthetic-provider-id',submittedAt:new Date().toISOString()}; } } as any,
     prospectModel,
   });
   const internalIds = new Map<string, string>();
@@ -714,8 +719,10 @@ test('the verified customer path is unaffected by the public catalog surface', a
   db.resetAndSeed();
   const router = new V2CanaryIngressRouter(db, new CommerceService(db), new V2RolloutService(db), {
     enabled: true,
+    prospectReplyScopes:TEST_PROSPECT_SCOPES,
+
     allowLegacyFallback: true,
-    outbound: { send: async () => {} } as any,
+    outbound: { send: async () => {return {status:'submitted',externalMessageId:'synthetic-provider-id',submittedAt:new Date().toISOString()};} } as any,
     prospectModel: model,
   });
 

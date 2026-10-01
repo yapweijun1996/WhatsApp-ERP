@@ -1,0 +1,32 @@
+name: Offline validation
+on:
+  pull_request:
+    branches: [main, preparation/owner-qr-controls, improvement/inbox-first-admin]
+permissions:
+  contents: read
+concurrency:
+  group: offline-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  offline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      NODE_ENV: test
+      ORDER_CHANNEL: simulated
+      DEMO_GPT_ENABLED: 'false'
+      V2_CANARY_RUNTIME_ENABLED: 'false'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.20.0'
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm test
+      - run: npx playwright install --with-deps chromium
+      - run: npm run e2e -- --reporter=line

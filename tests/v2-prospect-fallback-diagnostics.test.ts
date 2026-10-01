@@ -29,6 +29,9 @@ import type { ProspectModelCaller } from '../src/v2-prospect-semantic-router.js'
 const CONVERSATION = 'conv-prospect-fallback-diag';
 const SENDER = '+6586188375';
 
+// Explicit synthetic prospect reply authorization; never used in real runtime.
+const TEST_PROSPECT_SCOPES=["conv-prospect-fallback-diag"].map(externalConversationId=>({accountId:"demo-account",externalConversationId}));
+
 function makeMsg(override: Partial<IncomingChannelMessage> = {}): IncomingChannelMessage {
   return {
     accountId: 'demo-account',
@@ -49,7 +52,9 @@ function makeHarness(prospectModel?: ProspectModelCaller) {
   const sent: string[] = [];
   const router = new V2CanaryIngressRouter(db, new CommerceService(db), new V2RolloutService(db), {
     enabled: true,
-    outbound: { send: async (m: any) => { sent.push(m.text); } } as any,
+    prospectReplyScopes:TEST_PROSPECT_SCOPES,
+
+    outbound: { send: async (m: any) => { sent.push(m.text); return {status:'submitted',externalMessageId:'synthetic-provider-id',submittedAt:new Date().toISOString()};} } as any,
     prospectModel,
   });
   // Canonicalization maps the external conversation to an internal id; audits and

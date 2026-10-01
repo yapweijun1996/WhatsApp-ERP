@@ -14,6 +14,9 @@ import { V2RolloutService } from '../src/v2-rollout.js';
 import type { IncomingChannelMessage } from '../src/channel-contract.js';
 import type { ProspectModelCaller } from '../src/v2-prospect-semantic-router.js';
 
+// Explicit synthetic prospect reply authorization; never used in real runtime.
+const TEST_PROSPECT_SCOPES=["conv-001", "conv-blocked-test", "conv-cooldown-test", "conv-prospect-ai", "conv-prospect-erp-isolation", "conv-prospect-failclosed", "conv-prospect-no-model", "conv-suspicious-audit", "conv-suspicious-test", "unknown-conv-ext-001"].map(externalConversationId=>({accountId:"demo-account",externalConversationId}));
+
 function makeMsg(override: Partial<IncomingChannelMessage> = {}): IncomingChannelMessage {
   return {
     accountId: 'demo-account',
@@ -156,6 +159,8 @@ describe('Access control — PROSPECT cannot access ERP or workspace', () => {
     const rollout = new V2RolloutService(db);
     router = new V2CanaryIngressRouter(db, commerce, rollout, {
       enabled: true,
+    prospectReplyScopes:TEST_PROSPECT_SCOPES,
+
       allowLegacyFallback: true,
       outbound: { send: async () => {} } as any,
     });
@@ -279,6 +284,8 @@ describe('Abuse guard — zero-model path', () => {
     let sentReply: string | undefined;
     const router = new V2CanaryIngressRouter(db2, commerce, rollout, {
       enabled: true,
+    prospectReplyScopes:TEST_PROSPECT_SCOPES,
+
       allowLegacyFallback: true,
       outbound: { send: async (msg: any) => { sentReply = msg.text; } } as any,
     });
@@ -320,6 +327,8 @@ describe('Verified customer flow regression', () => {
     const rollout = new V2RolloutService(db);
     router = new V2CanaryIngressRouter(db, commerce, rollout, {
       enabled: true,
+    prospectReplyScopes:TEST_PROSPECT_SCOPES,
+
       allowLegacyFallback: true,
       outbound: { send: async () => {} } as any,
     });
@@ -353,6 +362,8 @@ describe('SALES_ORDER.DRAFT ceiling — authority unchanged for prospects', () =
     const rollout = new V2RolloutService(db);
     const router = new V2CanaryIngressRouter(db, commerce, rollout, {
       enabled: true,
+    prospectReplyScopes:TEST_PROSPECT_SCOPES,
+
       allowLegacyFallback: true,
       outbound: { send: async () => {} } as any,
     });
@@ -373,6 +384,8 @@ describe('SALES_ORDER.DRAFT ceiling — authority unchanged for prospects', () =
     let sentText: string | undefined;
     const router = new V2CanaryIngressRouter(db, commerce, rollout, {
       enabled: true,
+    prospectReplyScopes:TEST_PROSPECT_SCOPES,
+
       allowLegacyFallback: true,
       outbound: { send: async (msg: any) => { sentText = msg.text; } } as any,
       // No prospectModel configured — must fail closed to static onboarding
@@ -405,6 +418,8 @@ describe('SALES_ORDER.DRAFT ceiling — authority unchanged for prospects', () =
     };
     const router = new V2CanaryIngressRouter(db, commerce, rollout, {
       enabled: true,
+    prospectReplyScopes:TEST_PROSPECT_SCOPES,
+
       allowLegacyFallback: true,
       outbound: { send: async (msg: any) => { sentText = msg.text; } } as any,
       prospectModel,
@@ -445,6 +460,8 @@ describe('SALES_ORDER.DRAFT ceiling — authority unchanged for prospects', () =
     };
     const router = new V2CanaryIngressRouter(db, commerce, rollout, {
       enabled: true,
+    prospectReplyScopes:TEST_PROSPECT_SCOPES,
+
       allowLegacyFallback: true,
       outbound: { send: async () => {} } as any,
       prospectModel,
@@ -472,6 +489,8 @@ describe('SALES_ORDER.DRAFT ceiling — authority unchanged for prospects', () =
     };
     const router = new V2CanaryIngressRouter(db, commerce, rollout, {
       enabled: true,
+    prospectReplyScopes:TEST_PROSPECT_SCOPES,
+
       allowLegacyFallback: true,
       outbound: { send: async (msg: any) => { sentText = msg.text; } } as any,
       prospectModel,
@@ -522,6 +541,8 @@ describe('P2: SUSPICIOUS prospect explicit bounded behavior', () => {
     };
     const router = new V2CanaryIngressRouter(db, commerce, rollout, {
       enabled: true,
+    prospectReplyScopes:TEST_PROSPECT_SCOPES,
+
       allowLegacyFallback: true,
       outbound: { send: async (msg: any) => { sentText = msg.text; } } as any,
       prospectModel,
@@ -557,6 +578,8 @@ describe('P2: SUSPICIOUS prospect explicit bounded behavior', () => {
     const rollout = new V2RolloutService(db);
     const router = new V2CanaryIngressRouter(db, commerce, rollout, {
       enabled: true,
+    prospectReplyScopes:TEST_PROSPECT_SCOPES,
+
       allowLegacyFallback: true,
       outbound: { send: async () => {} } as any,
     });
@@ -596,6 +619,8 @@ describe('P2: SUSPICIOUS prospect explicit bounded behavior', () => {
     };
     const router = new V2CanaryIngressRouter(db, commerce, rollout, {
       enabled: true,
+    prospectReplyScopes:TEST_PROSPECT_SCOPES,
+
       allowLegacyFallback: true,
       outbound: { send: async () => {} } as any,
       prospectModel,
@@ -635,6 +660,8 @@ describe('P2: SUSPICIOUS prospect explicit bounded behavior', () => {
     };
     const router = new V2CanaryIngressRouter(db, commerce, rollout, {
       enabled: true,
+    prospectReplyScopes:TEST_PROSPECT_SCOPES,
+
       allowLegacyFallback: true,
       outbound: { send: async () => {} } as any,
       prospectModel,
