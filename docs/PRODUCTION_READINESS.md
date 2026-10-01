@@ -121,3 +121,14 @@ not a working V1 fallback. Settings prefers this projection and can derive scope
 status from existing inquiry/Pi/rollout metadata while older Phase0 labels remain
 in a pre-upgrade backend. These fields report readiness, not evidence of a live
 model request, provider submission, physical delivery or customer acceptance.
+
+### Persisted replies and inbox refresh
+Prospect rendered reply text/hash is committed as an UNKNOWN journal intent in
+the same transaction as its provider-dispatch claim, before the sole outbound
+service is invoked. Provider acknowledgement updates that intent to SUBMITTED;
+malformed/ambiguous disposition remains held and never automatically resends.
+Payload and terminal disposition cannot be rewritten. A selected account-scoped
+chat feed merges persisted incoming messages and these recorded replies.
+Pre-upgrade submissions without retained text appear only as an unavailable-text
+notice, never invented historical replies. Read-only list/chat polling preserves
+selection, focus, scroll and draft text. No polling path sends customer messages.

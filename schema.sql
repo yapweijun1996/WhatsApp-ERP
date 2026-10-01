@@ -714,3 +714,17 @@ CREATE TABLE IF NOT EXISTS account_inquiry_admissions(
  state TEXT NOT NULL CHECK(state IN ('ADMITTED','COMPLETED','FAILED')),error_code TEXT,
  PRIMARY KEY(account_id,external_message_id)
 );
+
+-- Rendered customer-visible reply intent, durable before provider submission.
+-- SUBMITTED is provider acknowledgement, never physical delivery evidence.
+CREATE TABLE IF NOT EXISTS conversation_reply_journal(
+ client_message_id TEXT PRIMARY KEY,account_id TEXT NOT NULL,conversation_id TEXT NOT NULL,
+ source TEXT NOT NULL CHECK(source IN ('PROSPECT','STAFF')),source_message_id TEXT,
+ text TEXT NOT NULL,text_hash TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('UNKNOWN','SUBMITTED','FAILED','SUPPRESSED')),
+ provider_message_id TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS conversation_reply_insert_guard BEFORE INSERT ON conversation_reply_journal WHEN v2_outbound_mutation_authorized()<>1 BEGIN SELECT RAISE(ABORT,'REPLY_JOURNAL_SERVICE_REQUIRED'); END;
+CREATE TRIGGER IF NOT EXISTS conversation_reply_update_guard BEFORE UPDATE ON conversation_reply_journal WHEN v2_outbound_mutation_authorized()<>1 BEGIN SELECT RAISE(ABORT,'REPLY_JOURNAL_SERVICE_REQUIRED'); END;
+CREATE TRIGGER IF NOT EXISTS conversation_reply_payload_immutable BEFORE UPDATE ON conversation_reply_journal WHEN NEW.client_message_id<>OLD.client_message_id OR NEW.account_id<>OLD.account_id OR NEW.conversation_id<>OLD.conversation_id OR NEW.source<>OLD.source OR NEW.source_message_id IS NOT OLD.source_message_id OR NEW.text<>OLD.text OR NEW.text_hash<>OLD.text_hash OR NEW.created_at<>OLD.created_at BEGIN SELECT RAISE(ABORT,'REPLY_JOURNAL_PAYLOAD_IMMUTABLE'); END;
+CREATE TRIGGER IF NOT EXISTS conversation_reply_state_transition BEFORE UPDATE ON conversation_reply_journal WHEN OLD.state<>'UNKNOWN' AND (NEW.state<>OLD.state OR NEW.provider_message_id IS NOT OLD.provider_message_id) BEGIN SELECT RAISE(ABORT,'REPLY_JOURNAL_TERMINAL'); END;
+CREATE TRIGGER IF NOT EXISTS conversation_reply_no_delete BEFORE DELETE ON conversation_reply_journal BEGIN SELECT RAISE(ABORT,'REPLY_JOURNAL_IMMUTABLE'); END;

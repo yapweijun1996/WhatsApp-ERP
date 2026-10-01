@@ -1,5 +1,6 @@
 import {AccountInquiryController} from './account-inquiry-policy.js';
 import {effectiveRuntimeStatus} from './effective-runtime-status.js';
+import {conversationMessageFeed} from './conversation-message-feed.js';
 import {installControlledTestSendGuard,type ControlledTestSendPolicy} from './controlled-test-send-guard.js';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import Fastify from 'fastify';
@@ -146,8 +147,8 @@ export function createApp(options: { dbFilename?: string; staffBootstrapCredenti
     reply.header('cache-control','no-store');const selected=selection(req);
     if(!selected)return reply.code(404).send({error:'CONVERSATION_NOT_FOUND'});
     const conversationId=selected.id,accountId=selected.accountId;
-    const messages=(service.database.db.prepare('SELECT id,direction,text,message_type messageType,occurred_at occurredAt FROM messages WHERE conversation_id=? AND account_id=? ORDER BY rowid').all(conversationId,accountId) as any[]).map(m=>({...m,from:m.direction==='INBOUND'?'customer':'ai'}));
-    const state={...service.state(conversationId),messages,phone:selected.phone??'',conversation:selected,operational:{...projectOperational().operational,startupMode:paused?'paused':'active',agentRuntime:piHarness?'pi-harness':'legacy-or-disabled'},v3Shadow:v3Shadow.telemetry({accountId,conversationId})};const s=session(req);
+    const feed=conversationMessageFeed(service.database.db,accountId,conversationId);
+    const state={...service.state(conversationId),...feed,phone:selected.phone??'',conversation:selected,operational:{...projectOperational().operational,startupMode:paused?'paused':'active',agentRuntime:piHarness?'pi-harness':'legacy-or-disabled'},v3Shadow:v3Shadow.telemetry({accountId,conversationId})};const s=session(req);
     return s?{...state,rollout:rollout.telemetry({accountId,conversationId})}:{...state,rollout:{detail:'STAFF_SESSION_REQUIRED'}}
   });
   app.get('/api/print',async(req:any,reply)=>{reply.header('cache-control','no-store');const selected=selection(req);if(!selected)return reply.code(404).send({error:'CONVERSATION_NOT_FOUND'});reply.header('content-security-policy',"default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'");reply.header('x-content-type-options','nosniff');return reply.type('text/html; charset=utf-8').send(renderConversationPrint(service.state(selected.id),selected))});
