@@ -728,3 +728,22 @@ CREATE TRIGGER IF NOT EXISTS conversation_reply_update_guard BEFORE UPDATE ON co
 CREATE TRIGGER IF NOT EXISTS conversation_reply_payload_immutable BEFORE UPDATE ON conversation_reply_journal WHEN NEW.client_message_id<>OLD.client_message_id OR NEW.account_id<>OLD.account_id OR NEW.conversation_id<>OLD.conversation_id OR NEW.source<>OLD.source OR NEW.source_message_id IS NOT OLD.source_message_id OR NEW.text<>OLD.text OR NEW.text_hash<>OLD.text_hash OR NEW.created_at<>OLD.created_at BEGIN SELECT RAISE(ABORT,'REPLY_JOURNAL_PAYLOAD_IMMUTABLE'); END;
 CREATE TRIGGER IF NOT EXISTS conversation_reply_state_transition BEFORE UPDATE ON conversation_reply_journal WHEN OLD.state<>'UNKNOWN' AND (NEW.state<>OLD.state OR NEW.provider_message_id IS NOT OLD.provider_message_id) BEGIN SELECT RAISE(ABORT,'REPLY_JOURNAL_TERMINAL'); END;
 CREATE TRIGGER IF NOT EXISTS conversation_reply_no_delete BEFORE DELETE ON conversation_reply_journal BEGIN SELECT RAISE(ABORT,'REPLY_JOURNAL_IMMUTABLE'); END;
+
+-- Independent staff takeover: no customer/commerce permission is issued here.
+CREATE TABLE IF NOT EXISTS conversation_staff_control(
+ account_id TEXT NOT NULL,conversation_id TEXT NOT NULL,mode TEXT NOT NULL CHECK(mode IN ('AI','HUMAN')),
+ revision INTEGER NOT NULL CHECK(revision>0),subject TEXT,updated_at TEXT NOT NULL,
+ CHECK((mode='AI' AND subject IS NULL) OR (mode='HUMAN' AND subject IS NOT NULL)),PRIMARY KEY(account_id,conversation_id)
+);
+CREATE TABLE IF NOT EXISTS conversation_staff_events(
+ account_id TEXT NOT NULL,command_id TEXT NOT NULL,conversation_id TEXT NOT NULL,subject TEXT NOT NULL,
+ action TEXT NOT NULL CHECK(action IN ('TAKEOVER','RESUME','SEND')),command_hash TEXT NOT NULL,
+ expected_revision INTEGER NOT NULL,result_revision INTEGER NOT NULL,client_message_id TEXT,created_at TEXT NOT NULL,
+ PRIMARY KEY(account_id,command_id)
+);
+CREATE TRIGGER IF NOT EXISTS conversation_control_insert_guard BEFORE INSERT ON conversation_staff_control WHEN v2_outbound_mutation_authorized()<>1 BEGIN SELECT RAISE(ABORT,'STAFF_CHAT_SERVICE_REQUIRED'); END;
+CREATE TRIGGER IF NOT EXISTS conversation_control_update_guard BEFORE UPDATE ON conversation_staff_control WHEN v2_outbound_mutation_authorized()<>1 OR NEW.account_id<>OLD.account_id OR NEW.conversation_id<>OLD.conversation_id OR NEW.revision<>OLD.revision+1 BEGIN SELECT RAISE(ABORT,'STAFF_CHAT_SERVICE_REQUIRED'); END;
+CREATE TRIGGER IF NOT EXISTS conversation_control_no_delete BEFORE DELETE ON conversation_staff_control BEGIN SELECT RAISE(ABORT,'STAFF_CHAT_CONTROL_IMMUTABLE'); END;
+CREATE TRIGGER IF NOT EXISTS conversation_staff_event_guard BEFORE INSERT ON conversation_staff_events WHEN v2_outbound_mutation_authorized()<>1 BEGIN SELECT RAISE(ABORT,'STAFF_CHAT_SERVICE_REQUIRED'); END;
+CREATE TRIGGER IF NOT EXISTS conversation_staff_event_no_update BEFORE UPDATE ON conversation_staff_events BEGIN SELECT RAISE(ABORT,'STAFF_CHAT_AUDIT_IMMUTABLE'); END;
+CREATE TRIGGER IF NOT EXISTS conversation_staff_event_no_delete BEFORE DELETE ON conversation_staff_events BEGIN SELECT RAISE(ABORT,'STAFF_CHAT_AUDIT_IMMUTABLE'); END;

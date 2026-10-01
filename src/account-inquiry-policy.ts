@@ -7,6 +7,8 @@ import {V2RolloutService,V2_CAPABILITIES} from './v2-rollout.js';
 import type {MigrationApprovalAuthority,MigrationAction,MigrationOwner} from './migration-auth.js';
 import type {RolloutApprovalAuthority} from './rollout-auth.js';
 import {canonicalSha256} from './v2-canonical.js';
+import type {StaffConversationControl} from './staff-conversation-control.js';
+import {randomUUID} from 'node:crypto';
 
 type Policy={account_id:string;approval_ref:string;subject:string;activated_at:string;revision:number;status:'APPROVED'|'REVOKED'};
 export type InquiryApprovalInput=Readonly<{accountId:string;approvalRef:string;subject:string}>;
@@ -31,13 +33,13 @@ export function registerAccountInquiryPolicy(database:V1Database,input:InquiryAp
     return row;
   });
 }
-type Active={canonical:CanonicalIngress;revision:number;startedAt:string};
+type Active={canonical:CanonicalIngress;revision:number;controlRevision:number;startedAt:string};
 export class AccountInquiryController {
   private readonly admissions=new WeakMap<object,Active>();
   private readonly active=new Map<string,Active>();
   constructor(private readonly database:V1Database,private readonly accountId:string,
     private readonly router:V2CanaryIngressRouter,private readonly migrationAuthority:MigrationApprovalAuthority,
-    private readonly rollout:V2RolloutService,private readonly rolloutAuthority:RolloutApprovalAuthority){
+    private readonly rollout:V2RolloutService,private readonly rolloutAuthority:RolloutApprovalAuthority,private readonly staffControl?:StaffConversationControl){
     if(!valid(accountId))throw Error('INQUIRY_ACCOUNT_REQUIRED');
     if(!this.policy())throw Error('INQUIRY_POLICY_REQUIRED');
   }
@@ -46,7 +48,7 @@ export class AccountInquiryController {
   verifyAdmission(token:unknown,canonical:CanonicalIngress){
     if(!token||typeof token!=='object')return false;
     const value=this.admissions.get(token);const p=this.policy();
-    return Boolean(value&&p&&p.revision===value.revision&&value.canonical.message.accountId===canonical.message.accountId&&value.canonical.message.conversationId===canonical.message.conversationId&&value.canonical.message.externalMessageId===canonical.message.externalMessageId&&value.canonical.customerId===canonical.customerId);
+    return Boolean(value&&p&&p.revision===value.revision&&(!this.staffControl||this.staffControl.allowsAi({accountId:canonical.message.accountId,conversationId:canonical.message.conversationId},value.controlRevision))&&value.canonical.message.accountId===canonical.message.accountId&&value.canonical.message.conversationId===canonical.message.conversationId&&value.canonical.message.externalMessageId===canonical.message.externalMessageId&&value.canonical.customerId===canonical.customerId);
   }
   /** Only the app's actual normalized channel callback calls this method. */
   async receiveFromChannel(input:IncomingChannelMessage){
@@ -62,15 +64,28 @@ export class AccountInquiryController {
     if(db.prepare('SELECT 1 FROM messages WHERE account_id=? AND external_message_id=?').get(input.accountId,input.externalMessageId))throw Error('INQUIRY_HISTORICAL_INPUT_DENIED');
     this.adoptExistingVerifiedPhoneAlias(input);
     const canonical=this.router.canonicalize(input)!;
-    const value:Active={canonical,revision:p.revision,startedAt:new Date().toISOString()};
+    const scope={accountId:input.accountId,conversationId:canonical.message.conversationId},control=this.staffControl?.snapshot(scope);
+    const value:Active={canonical,revision:p.revision,controlRevision:control?.revision??0,startedAt:new Date().toISOString()};
     const claim=this.database.runImmediate(()=>{
       const current=this.policy();if(!current||current.revision!==p.revision)throw Error('INQUIRY_POLICY_CHANGED');
       return db.prepare("INSERT OR IGNORE INTO account_inquiry_admissions(account_id,external_message_id,conversation_id,customer_id,policy_revision,occurred_at,admitted_at,state) VALUES(?,?,?,?,?,?,?,'ADMITTED')")
         .run(input.accountId,input.externalMessageId,canonical.message.conversationId,canonical.customerId,p.revision,input.occurredAt,value.startedAt).changes;
     });
     if(claim!==1){if(!db.prepare('SELECT 1 FROM account_inquiry_admissions WHERE account_id=? AND external_message_id=?').get(input.accountId,input.externalMessageId))throw Error('INQUIRY_ADMISSION_PERSISTENCE_REQUIRED');return {status:'INQUIRY_DUPLICATE_HELD'}}
+    if(control?.mode==='HUMAN'){
+      this.database.runImmediate(()=>{
+        const m=canonical.message;
+        const written=db.prepare("INSERT INTO messages(id,conversation_id,external_message_id,direction,message_type,text,sender_external_id,sender_phone,reply_to_external_message_id,account_id,occurred_at,raw_ref,forwarding_json) VALUES(?,?,?,'INBOUND',?,?,?,?,?,?,?,?,?)")
+          .run(randomUUID(),m.conversationId,m.externalMessageId,m.type,m.text??null,m.sender.externalId,m.sender.phone??null,m.replyToExternalMessageId??null,m.accountId,m.occurredAt,m.media?.externalRef??null,m.forwarding?JSON.stringify(m.forwarding):null);
+        if(written.changes!==1)throw Error('STAFF_CHAT_INBOUND_PERSISTENCE_REQUIRED');
+        db.prepare("UPDATE conversations SET last_message_at=CASE WHEN julianday(last_message_at) IS NULL OR julianday(last_message_at)<=julianday(?) THEN ? ELSE last_message_at END WHERE id=? AND channel_account_id=?").run(m.occurredAt,m.occurredAt,m.conversationId,m.accountId);
+        db.prepare("UPDATE account_inquiry_admissions SET state='COMPLETED',error_code='STAFF_TAKEOVER_HELD' WHERE account_id=? AND external_message_id=?").run(m.accountId,m.externalMessageId);
+      });
+      return {status:'STAFF_TAKEOVER_HELD',replySuppressed:true};
+    }
     const token=Object.freeze({});this.admissions.set(token,value);const key=this.key(input.accountId,input.externalMessageId);this.active.set(key,value);
     try{
+      if(!this.verifyAdmission(token,canonical))throw Error('INQUIRY_POLICY_CHANGED');
       if(canonical.customerId!==null)this.ensureVerifiedWorkspace(canonical,p);
       if(!this.verifyAdmission(token,canonical))throw Error('INQUIRY_POLICY_CHANGED');
       const result=await this.router.receiveCanonicalForInquiry(canonical,token);
@@ -146,7 +161,8 @@ export class AccountInquiryController {
     const send=channel.send.bind(channel);
     channel.send=async(message:OutgoingChannelMessage)=>{
       const policy=this.policy();if(!policy||message.accountId!==this.accountId)throw Error('INQUIRY_REPLY_ACCOUNT_DENIED');
-      const current=[...this.active.values()].filter(v=>v.revision===policy.revision&&v.canonical.message.accountId===message.accountId);
+      if(this.staffControl?.verifyManualWire(message))return send(message);
+      const current=[...this.active.values()].filter(v=>v.revision===policy.revision&&v.canonical.message.accountId===message.accountId&&(!this.staffControl||this.staffControl.allowsAi({accountId:message.accountId,conversationId:v.canonical.message.conversationId},v.controlRevision)));
       const match=current.find(v=>{
         const c=this.database.db.prepare('SELECT external_conversation_id FROM conversations WHERE id=? AND channel_account_id=?').get(v.canonical.message.conversationId,message.accountId) as {external_conversation_id:string}|undefined;
         if(c?.external_conversation_id!==message.conversationId)return false;
@@ -161,5 +177,6 @@ export class AccountInquiryController {
       return send(message);
     };
   }
+  isInFlight(scope:{accountId:string;conversationId:string}){return [...this.active.values()].some(v=>v.canonical.message.accountId===scope.accountId&&v.canonical.message.conversationId===scope.conversationId)||Boolean(this.database.db.prepare("SELECT 1 FROM account_inquiry_admissions WHERE account_id=? AND conversation_id=? AND state='ADMITTED'").get(scope.accountId,scope.conversationId));}
   describe(){const p=this.policy();return {enabled:Boolean(p),boundary:'SALES_ORDER.DRAFT',prospectAccess:'PUBLIC_CATALOG_ONLY',counts:this.database.db.prepare('SELECT state,count(*) AS count FROM account_inquiry_admissions WHERE account_id=? GROUP BY state').all(this.accountId)}};
 }
