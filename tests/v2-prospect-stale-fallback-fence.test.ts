@@ -35,6 +35,9 @@ const SENDER_Y = '+6586188376';
 const BASE_MS = Date.parse('2026-09-28T10:00:00.000Z');
 const at = (offsetMs: number) => new Date(BASE_MS + offsetMs).toISOString();
 
+// Explicit synthetic prospect reply authorization; never used in real runtime.
+const TEST_PROSPECT_SCOPES=["conv-prospect-stale-x", "conv-prospect-stale-y"].map(externalConversationId=>({accountId:"demo-account",externalConversationId}));
+
 function makeMsg(override: Partial<IncomingChannelMessage> = {}): IncomingChannelMessage {
   const sender = override.sender?.externalId ?? SENDER_X;
   return {
@@ -56,6 +59,8 @@ function makeHarness(prospectModel?: ProspectModelCaller) {
   const sent: { conversationId: string; text: string }[] = [];
   const router = new V2CanaryIngressRouter(db, new CommerceService(db), new V2RolloutService(db), {
     enabled: true,
+    prospectReplyScopes:TEST_PROSPECT_SCOPES,
+
     outbound: { send: async (m: any) => { sent.push({ conversationId: m.conversationId, text: m.text }); } } as any,
     prospectModel,
   });

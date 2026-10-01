@@ -24,6 +24,9 @@ import { PROSPECT_ONBOARDING_REPLY } from '../src/v2-inbound-abuse-guard.js';
 import type { IncomingChannelMessage } from '../src/channel-contract.js';
 import type { DemoGatewaySession } from '../src/gateway.js';
 
+// Explicit synthetic prospect reply authorization; never used in real runtime.
+const TEST_PROSPECT_SCOPES=["conv-001", "conv-factory-absent", "conv-factory-blocked", "conv-factory-cooldown", "conv-factory-err", "conv-factory-normal", "conv-factory-sus", "conv-no-binding", "conv-prospect-factory-ext"].map(externalConversationId=>({accountId:"demo-account",externalConversationId}));
+
 function makeMsg(override: Partial<IncomingChannelMessage> = {}): IncomingChannelMessage {
   return {
     accountId: 'demo-account',
@@ -138,6 +141,8 @@ test('NORMAL prospect with factory-backed prospectModel receives AI reply', asyn
 
   const router = new V2CanaryIngressRouter(db, commerce, rollout, {
     enabled: true,
+    prospectReplyScopes:TEST_PROSPECT_SCOPES,
+
     allowLegacyFallback: true,
     outbound: { send: async (msg: any) => { sentText = msg.text; } } as any,
     prospectModel,
@@ -174,6 +179,8 @@ test('absent prospectModel (demoSession unavailable) falls back to static onboar
   // No prospectModel = demoSession was undefined (demo gateway not configured)
   const router = new V2CanaryIngressRouter(db, commerce, rollout, {
     enabled: true,
+    prospectReplyScopes:TEST_PROSPECT_SCOPES,
+
     allowLegacyFallback: true,
     outbound: { send: async (msg: any) => { sentText = msg.text; } } as any,
     // prospectModel intentionally omitted
@@ -207,6 +214,8 @@ test('session error causes ProspectSemanticRouter to fail-closed to onboarding r
 
   const router = new V2CanaryIngressRouter(db, commerce, rollout, {
     enabled: true,
+    prospectReplyScopes:TEST_PROSPECT_SCOPES,
+
     allowLegacyFallback: true,
     outbound: { send: async (msg: any) => { sentText = msg.text; } } as any,
     prospectModel,
@@ -256,6 +265,8 @@ test('SUSPICIOUS state: factory-backed prospectModel is NOT called (zero model c
 
   const router = new V2CanaryIngressRouter(db, commerce, rollout, {
     enabled: true,
+    prospectReplyScopes:TEST_PROSPECT_SCOPES,
+
     allowLegacyFallback: true,
     outbound: { send: async () => {} } as any,
     prospectModel,
@@ -286,6 +297,8 @@ test('COOLDOWN state: factory-backed prospectModel is NOT called', async () => {
   const session = makeSession(async () => { sessionCallCount++; return { text: 'should not appear' }; });
   const router = new V2CanaryIngressRouter(db, commerce, rollout, {
     enabled: true,
+    prospectReplyScopes:TEST_PROSPECT_SCOPES,
+
     allowLegacyFallback: true,
     outbound: { send: async () => {} } as any,
     prospectModel: createProspectModelCaller(session),
@@ -315,6 +328,8 @@ test('BLOCKED state: factory-backed prospectModel is NOT called', async () => {
   const session = makeSession(async () => { sessionCallCount++; return { text: 'should not appear' }; });
   const router = new V2CanaryIngressRouter(db, commerce, rollout, {
     enabled: true,
+    prospectReplyScopes:TEST_PROSPECT_SCOPES,
+
     allowLegacyFallback: true,
     outbound: { send: async () => {} } as any,
     prospectModel: createProspectModelCaller(session),
@@ -345,6 +360,8 @@ test('NORMAL prospect with prospectModel is NOT bound to CUST-001 or any custome
   const session = makeSession(async () => ({ text: 'We can help! Please share your contact details.' }));
   const router = new V2CanaryIngressRouter(db, commerce, rollout, {
     enabled: true,
+    prospectReplyScopes:TEST_PROSPECT_SCOPES,
+
     allowLegacyFallback: true,
     outbound: { send: async () => {} } as any,
     prospectModel: createProspectModelCaller(session),
@@ -383,6 +400,8 @@ test('verified customer (CUST-001) canonicalize is unaffected by prospectModel p
   const session = makeSession(async () => ({ text: 'should never be called for verified customer' }));
   const router = new V2CanaryIngressRouter(db, commerce, rollout, {
     enabled: true,
+    prospectReplyScopes:TEST_PROSPECT_SCOPES,
+
     allowLegacyFallback: true,
     outbound: { send: async () => {} } as any,
     prospectModel: createProspectModelCaller(session),
@@ -410,6 +429,8 @@ test('PROSPECT_HANDLED result never contains sales order data regardless of pros
   const session = makeSession(async () => ({ text: 'Helpful business reply.' }));
   const router = new V2CanaryIngressRouter(db, commerce, rollout, {
     enabled: true,
+    prospectReplyScopes:TEST_PROSPECT_SCOPES,
+
     allowLegacyFallback: true,
     outbound: { send: async () => {} } as any,
     prospectModel: createProspectModelCaller(session),

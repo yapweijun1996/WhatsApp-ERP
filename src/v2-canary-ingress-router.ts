@@ -34,11 +34,13 @@ export const PROSPECT_AI_CATALOG_NO_MATCH_OUTCOME = 'PROSPECT_AI_ROUTED_CATALOG_
 /** Outcome for a provider redelivery whose reply was already decided and acted on. */
 export const PROSPECT_DUPLICATE_DELIVERY_OUTCOME = 'PROSPECT_DUPLICATE_DELIVERY';
 
-export type V2CanaryRouterOptions = { enabled?: boolean; transport?: AgentModelTransport; piHarness?: PiHarnessRunner; outbound: RuntimeOutboundOwner; owner?: string; timezone?: string; /** Explicitly test/demo-only V1 compatibility; never enable for live traffic. */ allowLegacyFallback?: boolean; /** Optional AI routing seam for NORMAL prospects. Fails closed to static onboarding reply when absent. */ prospectModel?: ProspectModelCaller; /** PUBLIC_CATALOG_READ surface for prospect discovery. Defaults to the canonical product source. */ prospectCatalog?: PublicCatalogReadContract };
+export type ProspectReplyScope = Readonly<{accountId:string;externalConversationId:string}>;
+export type V2CanaryRouterOptions = { prospectReplyScopes?:readonly ProspectReplyScope[]; enabled?: boolean; transport?: AgentModelTransport; piHarness?: PiHarnessRunner; outbound: RuntimeOutboundOwner; owner?: string; timezone?: string; /** Explicitly test/demo-only V1 compatibility; never enable for live traffic. */ allowLegacyFallback?: boolean; /** Optional AI routing seam for NORMAL prospects. Fails closed to static onboarding reply when absent. */ prospectModel?: ProspectModelCaller; /** PUBLIC_CATALOG_READ surface for prospect discovery. Defaults to the canonical product source. */ prospectCatalog?: PublicCatalogReadContract };
 export type CanonicalTurnRunner = (input: { start: AgentTurnStart; execute: (action: any, signal?: AbortSignal) => Promise<unknown> | unknown }) => Promise<unknown>;
 
 /** Sole inbound dispatcher. Routing is server-owned and decided before any V2 claim. */
 export class V2CanaryIngressRouter {
+  private readonly prospectReplyScopeKeys:ReadonlySet<string>;
   private readonly queue: V2QueueService;
   private readonly executor: V2CapabilityExecutor;
   private readonly enabled: boolean;
@@ -50,6 +52,9 @@ export class V2CanaryIngressRouter {
   private readonly drains = new Map<string, Promise<Map<string, unknown>>>();
 
   constructor(private readonly database: V1Database, private readonly commerce: CommerceService, private readonly rollout: V2RolloutService, private readonly options: V2CanaryRouterOptions) {
+    const scopes=options.prospectReplyScopes??[];
+    if(!Array.isArray(scopes)||scopes.length>1000)throw Error('PROSPECT_REPLY_SCOPE_INVALID');
+    this.prospectReplyScopeKeys=new Set(scopes.map(s=>{if(!s||typeof s.accountId!=='string'||typeof s.externalConversationId!=='string'||!s.accountId.trim()||!s.externalConversationId.trim()||s.accountId.length>200||s.externalConversationId.length>200||s.accountId.includes('*')||s.externalConversationId.includes('*'))throw Error('PROSPECT_REPLY_SCOPE_INVALID');return JSON.stringify([s.accountId,s.externalConversationId])}));
     this.queue = new V2QueueService(database);
     this.executor = new V2CapabilityExecutor(database, commerce);
     this.ingressPersistence = new ConversationIngressPersistence(database);
@@ -134,6 +139,17 @@ export class V2CanaryIngressRouter {
     // before any model call so a later reply decision can compare itself against
     // provider arrival order rather than model completion order.
     const inboundSeq = this.admitProspectInbound(message.accountId, message.conversationId, message.externalMessageId, message.occurredAt);
+
+    // A customer rollout is not prospect authorization. Fail closed before any
+    // model/catalog/abuse reply; preserve intake evidence without a historical send.
+    const destination=db.prepare('SELECT external_conversation_id FROM conversations WHERE id=? AND channel_account_id=?').get(message.conversationId,message.accountId) as {external_conversation_id:string}|undefined;
+    if(!destination||!this.prospectReplyScopeKeys.has(JSON.stringify([message.accountId,destination.external_conversation_id]))){
+      this.recordProspectReplyState(message.accountId,message.externalMessageId,'SUPPRESSED');
+      db.prepare(`INSERT INTO inbound_route_audit(id,account_id,conversation_id,external_message_id,identity_state,abuse_state,route_outcome,occurred_at)
+        SELECT ?,?,?,?,?,?,?,? WHERE NOT EXISTS(SELECT 1 FROM inbound_route_audit WHERE account_id=? AND external_message_id=? AND route_outcome='PROSPECT_OUTBOUND_SCOPE_REQUIRED')`)
+        .run(randomUUID(),message.accountId,message.conversationId,message.externalMessageId,identityState,'NOT_EVALUATED','PROSPECT_OUTBOUND_SCOPE_REQUIRED',message.occurredAt,message.accountId,message.externalMessageId);
+      return {status:'PROSPECT_PAUSED',identityState,routeOutcome:'PROSPECT_OUTBOUND_SCOPE_REQUIRED',replySuppressed:true,catalogCallCount:0,grounded:false,groundedProductIds:[]};
+    }
 
     // Deterministic abuse guard (zero model calls).
     const abuse = this.abuseGuard.evaluate(message.accountId, message.sender.externalId, message.occurredAt);

@@ -12,7 +12,7 @@ import { requestedTransportMode, runtimeTelemetry } from './runtime-mode.js';
 import { V2RolloutService } from './v2-rollout.js';
 import { createRolloutApprovalAuthority } from './rollout-auth.js';
 import { runV2Eval002 } from './v2-eval-002-harness.js';
-import { V2CanaryIngressRouter } from './v2-canary-ingress-router.js';
+import { V2CanaryIngressRouter, type ProspectReplyScope } from './v2-canary-ingress-router.js';
 import { DemoGatewaySession, demoGatewayConfig, demoGatewayModel } from './gateway.js';
 import { V2PiHarness } from './v2-pi-harness.js';
 import { createPiDemoStream } from './v2-pi-demo-stream.js';
@@ -32,7 +32,7 @@ const STAFF_COOKIE = 'waerp_staff_session';
 const staffCookieSecure=()=>process.env.NODE_ENV==='production'?'; Secure':'';
 function parseCookies(header?: string): Record<string,string> { return Object.fromEntries((header??'').split(';').map(x=>x.trim()).filter(Boolean).map(x=>{const i=x.indexOf('=');return i<0?[x,'']:[x.slice(0,i),decodeURIComponent(x.slice(i+1))]})); }
 
-export function createApp(options: { dbFilename?: string; staffBootstrapCredential?: string; semanticAgentFactory?: OrderSemanticAgentFactory; demoDataset?: 'default'|'petshop'; startupMode?: 'active'|'paused'; pairingOwnerControl?:PairingOwnerControl; channel?:WhatsAppChannelAdapter } = {}) {
+export function createApp(options: { dbFilename?: string; staffBootstrapCredential?: string; semanticAgentFactory?: OrderSemanticAgentFactory; demoDataset?: 'default'|'petshop'; startupMode?: 'active'|'paused'; prospectReplyScopes?:readonly ProspectReplyScope[]; pairingOwnerControl?:PairingOwnerControl; channel?:WhatsAppChannelAdapter } = {}) {
   const app=Fastify({logger:false});
   const paused=options.startupMode==='paused';
   const requestedChannel=requestedTransportMode();
@@ -64,7 +64,7 @@ export function createApp(options: { dbFilename?: string; staffBootstrapCredenti
   // Fails closed to static onboarding reply when absent — no ERP executor or customer
   // scope is reachable from the ProspectModelCaller interface.
   const prospectModel = demoSession ? createProspectModelCaller(demoSession) : undefined;
-  const v2Router=new V2CanaryIngressRouter(service.database,service,rollout,{enabled:canaryEnabled,piHarness,outbound:service.outbound,allowLegacyFallback,prospectModel});
+  const v2Router=new V2CanaryIngressRouter(service.database,service,rollout,{enabled:canaryEnabled,prospectReplyScopes:options.prospectReplyScopes,piHarness,outbound:service.outbound,allowLegacyFallback,prospectModel});
   // The live V3 bridge is present but fail-closed: activation still requires
   // the process-local opaque MIG-003 approval and an explicitly supplied V3
   // runtime composition. No provider traffic is enabled by this construction.
