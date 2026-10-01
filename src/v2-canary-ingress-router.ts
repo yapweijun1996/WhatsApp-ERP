@@ -5,6 +5,7 @@ import { V1Database } from './database.js';
 import { V2QueueService } from './v2-queue.js';
 import { V2RolloutService } from './v2-rollout.js';
 import { V2_CAPABILITIES } from './v2-rollout.js';
+import {ConversationReplyJournal} from './conversation-reply-journal.js';
 import { AgentTurnCoordinator, type AgentTurnStart } from './v2-agent-turn-coordinator.js';
 import { V2TransportRuntime } from './v2-transport-runtime.js';
 import { V2CapabilityExecutor } from './v2-capability-executor.js';
@@ -268,14 +269,17 @@ export class V2CanaryIngressRouter {
     let deliveryState:'SUBMITTED'|'UNKNOWN'|'SUPPRESSED'='SUPPRESSED';
     const outbound=this.options.outbound as any;
     if(dest && !suppressReply && typeof outbound.send==='function') {
-      const dispatch=db.prepare("UPDATE prospect_reply_delivery SET state='UNKNOWN',updated_at=? WHERE account_id=? AND external_message_id=? AND state='CLAIMED'")
-        .run(new Date().toISOString(),message.accountId,message.externalMessageId);
-      if(dispatch.changes!==1)throw Error('PROSPECT_DELIVERY_CLAIM_LOST');
+      const journal=new ConversationReplyJournal(this.database);
+      const claimed=journal.claim({clientMessageId,accountId:message.accountId,conversationId:message.conversationId,source:'PROSPECT',sourceMessageId:message.externalMessageId,text:replyText},()=>{
+        const dispatch=db.prepare("UPDATE prospect_reply_delivery SET state='UNKNOWN',updated_at=? WHERE account_id=? AND external_message_id=? AND state='CLAIMED'").run(new Date().toISOString(),message.accountId,message.externalMessageId);
+        if(dispatch.changes!==1)throw Error('PROSPECT_DELIVERY_CLAIM_LOST');
+      });
+      if(!claimed)throw Error('PROSPECT_REPLY_INTENT_ALREADY_HELD');
       deliveryState='UNKNOWN';
       const outMsg:OutgoingChannelMessage={accountId:message.accountId,clientMessageId,conversationId:dest.external_conversation_id,replyToExternalMessageId:message.externalMessageId,text:replyText};
       try {
         const result=await outbound.send(outMsg);
-        if(result?.status==='submitted')deliveryState='SUBMITTED';
+        if(journal.finalize(clientMessageId,result)==='SUBMITTED')deliveryState='SUBMITTED';
       } catch { /* unknown delivery stays durable; no automatic resend */ }
     }
     db.prepare('UPDATE prospect_reply_delivery SET state=?,updated_at=? WHERE account_id=? AND external_message_id=?')

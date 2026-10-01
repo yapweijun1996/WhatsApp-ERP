@@ -3,7 +3,7 @@ import type Database from 'better-sqlite3';
 export function listConversations(db:Database.Database,accountId:string){
  return db.prepare(`SELECT co.id,co.customer_id customerId,co.status,co.last_message_at lastMessageAt,
  cu.name customerName,cu.code customerCode,cu.currency,
- (SELECT m.text FROM messages m WHERE m.conversation_id=co.id AND m.account_id=co.channel_account_id ORDER BY m.rowid DESC LIMIT 1) preview,
+ (SELECT text FROM (SELECT m.text,m.occurred_at at,m.rowid seq FROM messages m WHERE m.conversation_id=co.id AND m.account_id=co.channel_account_id UNION ALL SELECT j.text,j.created_at at,j.rowid seq FROM conversation_reply_journal j WHERE j.conversation_id=co.id AND j.account_id=co.channel_account_id) ORDER BY at DESC,seq DESC LIMIT 1) preview,
  (SELECT m.sender_phone FROM messages m WHERE m.conversation_id=co.id AND m.account_id=co.channel_account_id AND m.direction='INBOUND' ORDER BY m.rowid DESC LIMIT 1) phone,
  (SELECT q.quotation_no FROM quotations q WHERE q.source_conversation_id=co.id ORDER BY q.rowid DESC LIMIT 1) quotationNo,
  (SELECT so.status FROM sales_orders so JOIN quotations q ON q.id=so.source_quotation_id WHERE q.source_conversation_id=co.id ORDER BY q.rowid DESC LIMIT 1) orderStatus
