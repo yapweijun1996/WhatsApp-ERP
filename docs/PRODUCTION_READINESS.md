@@ -48,3 +48,21 @@ request and rolls back that intake, permitting a retry while scope remains denie
 no successful suppression is reported from nonterminal state. Historical denial
 audit is also a terminal fence for legacy inconsistent PENDING rows. Persistence
 failure is operationally unresolved, not an authorization or delivery success.
+
+
+### Controlled recipient/provider-attempt test fence (opt-in, not activated)
+Host createApp controlledTest option installs a send fence before startup on the
+shared channel, covering generic, quotation and grounded sends through the sole
+outbound service. Omitted option leaves existing runtime unchanged; opting in
+without sendPolicy fails closed. Policy names exactly one account, canonical
+conversation and external recipient; it grants no customer binding, workspace
+capabilities or consent. Group/broadcast/newsletter destinations are rejected.
+A durable SQLite immediate transaction reserves one of three provider attempts
+before every adapter call. Concurrent calls, process restart, ambiguous/failed
+results and crash-after-provider-call never refund slots. Policy ID/scope changes
+cannot silently reset a budget; the same account/recipient has a unique budget scope, even if the canonical conversation changes.
+Counters/evidence survive demo resets. No automatic refund/reset/new window is
+supported. Owner-approved future windows require separate reviewed handling.
+Do not activate processing or configure a real policy from this code release.
+No recipient, model or provider was contacted by its synthetic tests. Submitted
+means provider submission, not physical delivery or exactly-once semantics.
