@@ -35,7 +35,7 @@ export const PROSPECT_AI_CATALOG_NO_MATCH_OUTCOME = 'PROSPECT_AI_ROUTED_CATALOG_
 export const PROSPECT_DUPLICATE_DELIVERY_OUTCOME = 'PROSPECT_DUPLICATE_DELIVERY';
 
 export type ProspectReplyScope = Readonly<{accountId:string;externalConversationId:string}>;
-export type V2CanaryRouterOptions = { prospectReplyScopes?:readonly ProspectReplyScope[]; enabled?: boolean; transport?: AgentModelTransport; piHarness?: PiHarnessRunner; outbound: RuntimeOutboundOwner; owner?: string; timezone?: string; /** Explicitly test/demo-only V1 compatibility; never enable for live traffic. */ allowLegacyFallback?: boolean; /** Optional AI routing seam for NORMAL prospects. Fails closed to static onboarding reply when absent. */ prospectModel?: ProspectModelCaller; /** PUBLIC_CATALOG_READ surface for prospect discovery. Defaults to the canonical product source. */ prospectCatalog?: PublicCatalogReadContract };
+export type V2CanaryRouterOptions = { prospectReplyScopes?:readonly ProspectReplyScope[]; verifyInquiryAdmission?:(token:unknown,canonical:NonNullable<ReturnType<ConversationIngressPersistence['resolve']>>)=>boolean; enabled?: boolean; transport?: AgentModelTransport; piHarness?: PiHarnessRunner; outbound: RuntimeOutboundOwner; owner?: string; timezone?: string; /** Explicitly test/demo-only V1 compatibility; never enable for live traffic. */ allowLegacyFallback?: boolean; /** Optional AI routing seam for NORMAL prospects. Fails closed to static onboarding reply when absent. */ prospectModel?: ProspectModelCaller; /** PUBLIC_CATALOG_READ surface for prospect discovery. Defaults to the canonical product source. */ prospectCatalog?: PublicCatalogReadContract };
 export type CanonicalTurnRunner = (input: { start: AgentTurnStart; execute: (action: any, signal?: AbortSignal) => Promise<unknown> | unknown }) => Promise<unknown>;
 
 /** Sole inbound dispatcher. Routing is server-owned and decided before any V2 claim. */
@@ -83,9 +83,15 @@ export class V2CanaryIngressRouter {
     return this.receiveCanonicalWithRunner(canonical);
   }
 
+  /** Opaque host admission; HTTP bodies cannot manufacture this token. */
+  async receiveCanonicalForInquiry(canonical:NonNullable<ReturnType<ConversationIngressPersistence['resolve']>>,admission:object){
+    if(!this.options.verifyInquiryAdmission?.(admission,canonical))throw Error('INQUIRY_ADMISSION_REQUIRED');
+    return this.receiveCanonicalWithRunner(canonical,undefined,admission);
+  }
+
   /** V3 host-only continuation: same enqueue/claim/lease/drain path, with a
    * scoped runtime override selected before the queue is claimed. */
-  async receiveCanonicalWithRunner(canonical: NonNullable<ReturnType<ConversationIngressPersistence['resolve']>>, runner?: CanonicalTurnRunner): Promise<unknown> {
+  async receiveCanonicalWithRunner(canonical: NonNullable<ReturnType<ConversationIngressPersistence['resolve']>>, runner?: CanonicalTurnRunner, inquiryAdmission?:object): Promise<unknown> {
     if (!this.enabled) throw Error('V2_RUNTIME_DISABLED_FAIL_CLOSED');
     const { message, customerId } = canonical;
 
@@ -98,7 +104,7 @@ export class V2CanaryIngressRouter {
 
     // Prospect path: no verified customer binding. Cannot access V2 workspace or ERP.
     if (customerId === null) {
-      return this.handleProspect(canonical);
+      return this.handleProspect(canonical,inquiryAdmission);
     }
 
     const route = this.route(message.accountId, message.conversationId, customerId);
@@ -119,7 +125,7 @@ export class V2CanaryIngressRouter {
 
   /** Prospect handler: persist inbound, run abuse guard, send zero-token or onboarding reply.
    * OutboundMessageService is sole sender. No ERP or workspace access. */
-  private async handleProspect(canonical: NonNullable<ReturnType<ConversationIngressPersistence['resolve']>>): Promise<unknown> {
+  private async handleProspect(canonical: NonNullable<ReturnType<ConversationIngressPersistence['resolve']>>,inquiryAdmission?:object): Promise<unknown> {
     const { message } = canonical;
     const identityState: IdentityState = canonical.identityState ?? 'UNKNOWN';
     const db = this.database.db;
@@ -153,7 +159,7 @@ export class V2CanaryIngressRouter {
       // A customer rollout is not prospect authorization. Fail closed before any
       // model/catalog/abuse reply; preserve intake evidence without a historical send.
       const destination=db.prepare('SELECT external_conversation_id FROM conversations WHERE id=? AND channel_account_id=?').get(message.conversationId,message.accountId) as {external_conversation_id:string}|undefined;
-      if(!destination||!this.prospectReplyScopeKeys.has(JSON.stringify([message.accountId,destination.external_conversation_id]))){
+      if(!destination||(!this.prospectReplyScopeKeys.has(JSON.stringify([message.accountId,destination.external_conversation_id]))&&!this.options.verifyInquiryAdmission?.(inquiryAdmission,canonical))){
         this.recordProspectReplyState(message.accountId,message.externalMessageId,'SUPPRESSED');
         db.prepare(`INSERT INTO inbound_route_audit(id,account_id,conversation_id,external_message_id,identity_state,abuse_state,route_outcome,occurred_at)
           SELECT ?,?,?,?,?,?,?,? WHERE NOT EXISTS(SELECT 1 FROM inbound_route_audit WHERE account_id=? AND external_message_id=? AND route_outcome='PROSPECT_OUTBOUND_SCOPE_REQUIRED')`)
@@ -266,7 +272,7 @@ export class V2CanaryIngressRouter {
         .run(new Date().toISOString(),message.accountId,message.externalMessageId);
       if(dispatch.changes!==1)throw Error('PROSPECT_DELIVERY_CLAIM_LOST');
       deliveryState='UNKNOWN';
-      const outMsg:OutgoingChannelMessage={accountId:message.accountId,clientMessageId,conversationId:dest.external_conversation_id,text:replyText};
+      const outMsg:OutgoingChannelMessage={accountId:message.accountId,clientMessageId,conversationId:dest.external_conversation_id,replyToExternalMessageId:message.externalMessageId,text:replyText};
       try {
         const result=await outbound.send(outMsg);
         if(result?.status==='submitted')deliveryState='SUBMITTED';

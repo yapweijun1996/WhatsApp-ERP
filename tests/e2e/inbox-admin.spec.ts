@@ -29,3 +29,10 @@ test('SVG controls preserve accessible names, native keyboard activation and dis
  const summary=page.locator('#doc summary');await expect(summary.locator('svg')).toBeVisible();await summary.focus();await page.keyboard.press('Enter');await expect(page.locator('#doc details')).toHaveAttribute('open','');
  await page.screenshot({path:'../migration-evidence/svg-desktop.png',fullPage:true});await page.setViewportSize({width:390,height:844});await page.locator('[data-conversation-id="synthetic-alpha"]').click();await expect(page.locator('#chatPane')).toBeVisible();await page.screenshot({path:'../migration-evidence/svg-mobile.png',fullPage:true});
 });
+
+test('settings reflects active scoped inquiry provider metadata without paused claims or credentials',async({page})=>{
+ await useInboxFixtures(page);
+ await page.route('**/health',r=>r.fulfill({json:{startupMode:'active',channel:'whatsapp-qr',modelMode:'demo-gpt',agentRuntime:'pi-harness',runtimeMode:'V2',inquiry:{enabled:true,boundary:'SALES_ORDER.DRAFT'},llm:{provider:'demo-gpt',model:'demo-fast',runtime:'pi-harness-node',billingMode:'managed-demo-gateway'}}}));
+ await page.route('**/api/channel/status',r=>r.fulfill({json:{mode:'whatsapp-qr',status:'connected',qrReady:false,qr:null,pairingControl:{enabled:false,processingPaused:false}}}));
+ await page.goto('/');await page.locator('#navSettings').click();await expect(page.locator('#settingsProcessingCopy')).toContainText('咨询处理已启用');await expect(page.locator('#settingsProcessingCopy')).not.toContainText('保持暂停');await expect(page.locator('#runtime')).toContainText('demo-gpt');await expect(page.locator('#runtime')).toContainText('demo-fast');await expect(page.locator('#runtime')).toContainText('pi-harness-node');await expect(page.locator('#runtime')).toContainText('managed-demo-gateway');await expect(page.locator('#migrationBanner')).not.toBeVisible();await expect(page.locator('#pairingControls')).not.toBeVisible();await expect(page.locator('#simulatorControls')).not.toBeVisible();await expect(page.locator('#settingsView')).not.toContainText('Bearer ');
+});

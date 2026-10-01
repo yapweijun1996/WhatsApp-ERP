@@ -37,6 +37,33 @@ export class V2RolloutService{
   configure(input:{capability:unknown;enabled:boolean;accountId?:string;conversationId?:string;idempotencyKey:string;approval:RolloutApproval}){
     return this.mutate(input,input.enabled?'ENABLE':'DISABLE');
   }
+  /** First inquiry grant only: never UPDATE/re-enable an exact existing row.
+   * Validation and conditional insert share the SQLite writer transaction. */
+  enableIfAbsent(input:{capability:unknown;accountId:string;conversationId:string;idempotencyKey:string;approval:RolloutApproval},validateCurrent:()=>void){
+    const name=capability(input.capability),s=scope(input);
+    if(!s.accountId||!s.conversationId)workspaceFail('ROLLOUT_EXACT_SCOPE_REQUIRED');
+    if(!valid(input.idempotencyKey))workspaceFail('ROLLOUT_IDEMPOTENCY_REQUIRED');
+    const approval=this.verify(input.approval,{action:'ENABLE',capability:name,accountId:s.accountId,conversationId:s.conversationId,enabled:true});
+    const inputHash=canonicalSha256({name,accountId:s.accountId,conversationId:s.conversationId,enabled:true,idempotencyKey:input.idempotencyKey,action:'ENABLE',initialOnly:true});
+    return this.database.runRolloutMutation(()=>{
+      this.ensureScope(s);
+      validateCurrent();
+      const authority=this.authority(s.accountId!,s.conversationId!);
+      if(!authority||authority.authoritative_writer!=='V2'||authority.quarantine_reason||!['V2_CANARY','V2_PRIMARY','LEGACY_RETIRED'].includes(authority.migration_state))workspaceFail('WORKSPACE_AUTHORITY_REQUIRED');
+      const key=this.key(s),existing=this.db.prepare('SELECT enabled FROM v2_capability_rollouts WHERE capability=? AND account_id IS ? AND conversation_id IS ?').get(name,...key) as {enabled:number}|undefined;
+      if(existing?.enabled===0)workspaceFail('ROLLOUT_EXPLICIT_DISABLE');
+      if(existing?.enabled===1)return {status:'ALREADY_ENABLED',capability:name};
+      const prior=this.db.prepare('SELECT input_hash FROM v2_rollout_events WHERE idempotency_key=?').get(input.idempotencyKey) as {input_hash:string}|undefined;
+      if(prior)workspaceFail(prior.input_hash===inputHash?'ROLLOUT_INITIAL_GRANT_MISSING':'ROLLOUT_IDEMPOTENCY_CONFLICT');
+      const t=now();
+      const inserted=this.db.prepare('INSERT INTO v2_capability_rollouts(capability,account_id,conversation_id,enabled,updated_at,updated_by) SELECT ?,?,?,1,?,? WHERE NOT EXISTS(SELECT 1 FROM v2_capability_rollouts WHERE capability=? AND account_id IS ? AND conversation_id IS ?)').run(name,...key,t,approval.subject,name,...key);
+      const observed=this.db.prepare('SELECT enabled FROM v2_capability_rollouts WHERE capability=? AND account_id IS ? AND conversation_id IS ?').get(name,...key) as {enabled:number}|undefined;
+      if(inserted.changes!==1||observed?.enabled!==1)workspaceFail('ROLLOUT_INITIAL_GRANT_PERSISTENCE_REQUIRED');
+      const result={status:'ENABLED',capability:name,scope:{accountId:key[0],conversationId:key[1]},configuredEnabled:true,action:'ENABLE'};
+      this.db.prepare('INSERT INTO v2_rollout_events(id,capability,account_id,conversation_id,action,enabled,idempotency_key,input_hash,approval_subject,result_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(randomUUID(),name,...key,'ENABLE',1,input.idempotencyKey,inputHash,approval.subject,JSON.stringify(result),t);
+      return result;
+    },input.approval);
+  }
   private mutate(input:{capability:unknown;enabled:boolean;accountId?:string;conversationId?:string;idempotencyKey:string;approval:RolloutApproval},action:RolloutAction){
     const name=capability(input.capability);const s=scope({accountId:input.accountId,conversationId:input.conversationId});this.ensureScope(s);if(typeof input.enabled!=='boolean')workspaceFail('ROLLOUT_ENABLED_INVALID');if(!valid(input.idempotencyKey))workspaceFail('ROLLOUT_IDEMPOTENCY_REQUIRED');
     const approval=this.verify(input.approval,{action,capability:name,accountId:s.accountId??null,conversationId:s.conversationId??null,enabled:input.enabled});const inputHash=canonicalSha256({name,...s,enabled:input.enabled,idempotencyKey:input.idempotencyKey,action});

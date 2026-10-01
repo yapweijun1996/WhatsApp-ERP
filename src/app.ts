@@ -1,3 +1,4 @@
+import {AccountInquiryController} from './account-inquiry-policy.js';
 import {installControlledTestSendGuard,type ControlledTestSendPolicy} from './controlled-test-send-guard.js';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import Fastify from 'fastify';
@@ -33,7 +34,7 @@ const STAFF_COOKIE = 'waerp_staff_session';
 const staffCookieSecure=()=>process.env.NODE_ENV==='production'?'; Secure':'';
 function parseCookies(header?: string): Record<string,string> { return Object.fromEntries((header??'').split(';').map(x=>x.trim()).filter(Boolean).map(x=>{const i=x.indexOf('=');return i<0?[x,'']:[x.slice(0,i),decodeURIComponent(x.slice(i+1))]})); }
 
-export function createApp(options: { dbFilename?: string; staffBootstrapCredential?: string; semanticAgentFactory?: OrderSemanticAgentFactory; demoDataset?: 'default'|'petshop'; startupMode?: 'active'|'paused'; prospectReplyScopes?:readonly ProspectReplyScope[]; pairingOwnerControl?:PairingOwnerControl; channel?:WhatsAppChannelAdapter; controlledTest?: {sendPolicy?:ControlledTestSendPolicy} } = {}) {
+export function createApp(options: { dbFilename?: string; staffBootstrapCredential?: string; semanticAgentFactory?: OrderSemanticAgentFactory; demoDataset?: 'default'|'petshop'; startupMode?: 'active'|'paused'; prospectReplyScopes?:readonly ProspectReplyScope[]; pairingOwnerControl?:PairingOwnerControl; channel?:WhatsAppChannelAdapter; controlledTest?: {sendPolicy?:ControlledTestSendPolicy}; inquiryAccountId?:string } = {}) {
   const app=Fastify({logger:false});
   const paused=options.startupMode==='paused';
   const requestedChannel=requestedTransportMode();
@@ -42,7 +43,8 @@ export function createApp(options: { dbFilename?: string; staffBootstrapCredenti
   const pairingOwner=options.pairingOwnerControl??pairingOwnerControlFromEnv();
   const staffAuthority=createStaffCapabilityAuthority();
   const rolloutAuthority=createRolloutApprovalAuthority();
-  const service=new CommerceService(new V1Database(options.dbFilename ?? process.env.ORDER_DB ?? 'order-intelligence.db',undefined,rolloutAuthority,options.demoDataset ?? (process.env.DEMO_DATASET === 'petshop' ? 'petshop' : 'default')),channel,staffAuthority.verify,options.semanticAgentFactory);
+  const migrationAuthority=createMigrationApprovalAuthority();
+  const service=new CommerceService(new V1Database(options.dbFilename ?? process.env.ORDER_DB ?? 'order-intelligence.db',migrationAuthority,rolloutAuthority,options.demoDataset ?? (process.env.DEMO_DATASET === 'petshop' ? 'petshop' : 'default')),channel,staffAuthority.verify,options.semanticAgentFactory);
   if(options.controlledTest)installControlledTestSendGuard(service.database,channel,options.controlledTest.sendPolicy);
   const rollout=new V2RolloutService(service.database,rolloutAuthority);
   const seams=createV1ServiceSeams(service);
@@ -66,11 +68,11 @@ export function createApp(options: { dbFilename?: string; staffBootstrapCredenti
   // Fails closed to static onboarding reply when absent — no ERP executor or customer
   // scope is reachable from the ProspectModelCaller interface.
   const prospectModel = demoSession ? createProspectModelCaller(demoSession) : undefined;
-  const v2Router=new V2CanaryIngressRouter(service.database,service,rollout,{enabled:canaryEnabled,prospectReplyScopes:options.prospectReplyScopes,piHarness,outbound:service.outbound,allowLegacyFallback,prospectModel});
+  let inquiry:AccountInquiryController|undefined;
+  const v2Router=new V2CanaryIngressRouter(service.database,service,rollout,{enabled:canaryEnabled,prospectReplyScopes:options.prospectReplyScopes,verifyInquiryAdmission:(token,canonical)=>inquiry?.verifyAdmission(token,canonical)??false,piHarness,outbound:service.outbound,allowLegacyFallback,prospectModel});
   // The live V3 bridge is present but fail-closed: activation still requires
   // the process-local opaque MIG-003 approval and an explicitly supplied V3
   // runtime composition. No provider traffic is enabled by this construction.
-  const migrationAuthority=createMigrationApprovalAuthority();
   // V3 runtime composition is wired only when a Pi harness is available (requires
   // GATEWAY_URL + API_KEY). Without a harness the bridge remains fail-closed on
   // any activated V3 scope (V3_RUNTIME_COMPOSITION_REQUIRED), which is the safe
@@ -87,11 +89,17 @@ export function createApp(options: { dbFilename?: string; staffBootstrapCredenti
     const v2Result = canaryEnabled ? await v3Canary.receive(input) : await v2Router.receive(input);
     return v3Shadow.runShadowOnly({accountId:input.accountId,conversationId:input.conversationId},v2Result,()=>undefined);
   };
-  service.ensureSeeded();
+  if(!options.inquiryAccountId)service.ensureSeeded();
+  if(options.inquiryAccountId){
+    if(!canaryEnabled||!piHarness)throw Error('INQUIRY_REAL_RUNTIME_CONFIG_REQUIRED');
+    inquiry=new AccountInquiryController(service.database,options.inquiryAccountId,v2Router,migrationAuthority,rollout,rolloutAuthority);
+    inquiry.installReplyFence(channel);
+  }
+
   // Channel delivery may begin while an async adapter is connecting. Gate both
   // inbound delivery and the simulated route on recovery completing first.
-  const startupReady = (paused ? Promise.resolve() : channel.connect().then(async () => { await service.reconcileOutbound(); }).catch(error => { app.log.error({err:error},'channel startup failed'); throw error; }));
-  channel.onMessage(async message=>{if(paused)return;try{await startupReady;await receiveWithShadow(message)}catch(error){app.log.error({err:error},'channel inbound failed')}});
+  const startupReady = (paused ? Promise.resolve() : channel.connect().then(async () => { if(!inquiry)await service.reconcileOutbound(); }).catch(error => { app.log.error({err:error},'channel startup failed'); throw error; }));
+  channel.onMessage(async message=>{if(paused)return;try{await startupReady;if(inquiry)await inquiry.receiveFromChannel(message);else await receiveWithShadow(message)}catch(error){app.log.error({err:error},'channel inbound failed')}});
   const staffSessions=new Map<string,{subject:string;expiresAt:number;capability:StaffCapability}>();
   const bootstrapCredential=options.staffBootstrapCredential ?? process.env.STAFF_BOOTSTRAP_CREDENTIAL;
   const validBootstrap=(req:any)=>{
@@ -106,7 +114,7 @@ export function createApp(options: { dbFilename?: string; staffBootstrapCredenti
   app.register(fastifyStatic,{root});
   app.get('/',async(_,r)=>r.sendFile('index.html'));
   app.addHook('onRequest',async(req,reply)=>{if(paused&&!(req.method==='POST'&&req.url.split('?')[0]==='/api/channel/pairing')&&['POST','PUT','PATCH','DELETE'].includes(req.method))return reply.code(503).send({error:'MIGRATION_RUNTIME_PAUSED'})});
-  app.get('/health',async()=>{const operational=runtimeTelemetry();const channel=process.env.ORDER_CHANNEL??process.env.WHATSAPP_CHANNEL??'simulated';return{ok:true,startupMode:paused?'paused':'active',channel,...operational,agentRuntime:piHarness?'pi-harness':'legacy-or-disabled',rollout:{v2Traffic:'OFF',v3Shadow:'PROPOSED'}}});
+  app.get('/health',async()=>{const operational=runtimeTelemetry();const channel=process.env.ORDER_CHANNEL??process.env.WHATSAPP_CHANNEL??'simulated';return{ok:true,startupMode:paused?'paused':'active',channel,...operational,agentRuntime:piHarness?'pi-harness':'legacy-or-disabled',rollout:{v2Traffic:inquiry?'SCOPED':'OFF',v3Shadow:inquiry?'OFF':'PROPOSED'},inquiry:inquiry?.describe()??{enabled:false},llm:{provider:demoSession?'demo-gpt':null,model:demoSession?demoConfig.model:null,runtime:piHarness?'pi-harness-node':'disabled',billingMode:demoSession?'managed-demo-gateway':'disabled'}}});
   if (process.env.NODE_ENV === 'test' && process.env.V2_EVAL_002_SURFACE === '1') app.get('/api/test-only/v2-eval-002', async () => runV2Eval002());
   const channelStatus=async()=>({...('getStatusInfo' in channel ? (channel as any).getStatusInfo() : {status:await channel.getStatus(),mode:'simulated',adapter:'WhatsAppChannelAdapter',qrReady:false,qr:null}),pairingControl:{enabled:Boolean(paused&&isQr&&pairingOwner),processingPaused:paused}});
   app.get('/api/channel/status',async(_,reply)=>{reply.header('cache-control','no-store');return channelStatus()});
@@ -143,11 +151,11 @@ export function createApp(options: { dbFilename?: string; staffBootstrapCredenti
   app.get('/api/print',async(req:any,reply)=>{reply.header('cache-control','no-store');const selected=selection(req);if(!selected)return reply.code(404).send({error:'CONVERSATION_NOT_FOUND'});reply.header('content-security-policy',"default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'");reply.header('x-content-type-options','nosniff');return reply.type('text/html; charset=utf-8').send(renderConversationPrint(service.state(selected.id),selected))});
   app.get('/api/agent-trace',async(req:any,reply)=>{reply.header('cache-control','no-store');const selected=selection(req);if(!selected)return reply.code(404).send({error:'CONVERSATION_NOT_FOUND'});return projectAgentTrace(service.database.db,selected.accountId,selected.id)});
   app.get('/api/agent-harness',async()=>piHarness?piHarness.describe():{engine:'disabled',role:null,skills:[],tools:[],authority:'NONE'});
-  app.post('/api/simulated/inbound',async(req:any)=>{await startupReady;const b=req.body??{};const input={channel:'whatsapp' as const,accountId:'demo-account',externalMessageId:b.externalMessageId??`api-${Date.now()}-${randomBytes(3).toString('hex')}`,conversationId:'conv-001',sender:{externalId:'+6591110001',phone:'+6591110001'},type:b.type??'text',text:b.text,occurredAt:new Date().toISOString()};return receiveWithShadow(input)});
+  app.post('/api/simulated/inbound',async(req:any,reply)=>{if(inquiry)return reply.code(503).send({error:'INQUIRY_TRUSTED_CHANNEL_REQUIRED'});await startupReady;const b=req.body??{};const input={channel:'whatsapp' as const,accountId:'demo-account',externalMessageId:b.externalMessageId??`api-${Date.now()}-${randomBytes(3).toString('hex')}`,conversationId:'conv-001',sender:{externalId:'+6591110001',phone:'+6591110001'},type:b.type??'text',text:b.text,occurredAt:new Date().toISOString()};return receiveWithShadow(input)});
   app.get('/api/staff/session',async req=>{const s=session(req);return{authenticated:Boolean(s),subject:s?.subject??null}});
   app.post('/api/staff/session',async(req:any,reply)=>{if(!validBootstrap(req))return reply.code(401).send({error:'STAFF_BOOTSTRAP_REQUIRED'});const token=randomBytes(24).toString('base64url');staffSessions.set(token,{subject:'demo-staff',expiresAt:Date.now()+3600000,capability:staffAuthority.issue('demo-staff')});reply.header('set-cookie',`${STAFF_COOKIE}=${encodeURIComponent(token)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=3600${staffCookieSecure()}`);return{authenticated:true,subject:'demo-staff'}});
   app.delete('/api/staff/session',async(req,reply)=>{const s=session(req);if(s)staffSessions.delete(s.token);reply.header('set-cookie',`${STAFF_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${staffCookieSecure()}`);return{authenticated:false}});
   app.post('/api/staff/:action',async(req:any,reply)=>{const s=session(req);if(!s)return reply.code(401).send({error:'STAFF_SESSION_REQUIRED'});const action=String(req.params.action);if(!['post','confirm','do'].includes(action))return reply.code(400).send({error:'INVALID_STAFF_ACTION'});try{const b=req.body??{};if(!b.salesOrderNo)return reply.code(400).send({error:'SALES_ORDER_REQUIRED'});return await seams.staffCommit.commit({action:action as 'post'|'confirm'|'do',capability:s.capability,idempotencyKey:b.idempotencyKey??`${s.subject}-${action}-${Date.now()}`,evidence:b.doubleConfirmationEvidence,salesOrderNo:String(b.salesOrderNo)})}catch(error){const message=(error as Error).message;return reply.code(message==='STOCK_SHORTAGE'||message==='INVALID_TRANSITION'?409:400).send({error:message})}});
-  app.post('/api/reset',async(req:any,reply)=>{if(!session(req)&&!validBootstrap(req))return reply.code(401).send({error:'STAFF_BOOTSTRAP_REQUIRED'});service.resetAndSeed();return service.state()});
+  app.post('/api/reset',async(req:any,reply)=>{if(inquiry)return reply.code(503).send({error:'INQUIRY_RESET_DISABLED'});if(!session(req)&&!validBootstrap(req))return reply.code(401).send({error:'STAFF_BOOTSTRAP_REQUIRED'});service.resetAndSeed();return service.state()});
   return {app,service,channel,seams,rollout,v3Shadow,v3Canary,migrationAuthority,startupReady};
 }
