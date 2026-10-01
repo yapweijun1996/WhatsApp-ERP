@@ -1,6 +1,6 @@
 import {createHash} from 'node:crypto';
 import {V1Database} from './database.js';
-import type {VerifyStaffCapability} from './staff-auth.js';
+import type {VerifyStaffCapability,StaffChatAction} from './staff-auth.js';
 import type {OutgoingChannelMessage,ChannelSendResult} from './channel-contract.js';
 import {ConversationReplyJournal,replyTextHash} from './conversation-reply-journal.js';
 
@@ -12,7 +12,7 @@ const identifier=(v:unknown)=>typeof v==='string'&&/^[A-Za-z0-9][A-Za-z0-9._:-]{
 
 /** Staff capability and canonical direct recipient are required independently of Access. */
 export class StaffConversationControl {
- private readonly permits=new WeakMap<object,{scope:Scope;subject:string;revision:number}>();
+ private readonly permits=new WeakMap<object,{scope:Scope;subject:string;revision:number;capability:unknown}>();
  constructor(private readonly database:V1Database,private readonly verifyStaff:VerifyStaffCapability,
   private readonly runtime:{accountId?:string;enabled:()=>boolean;inFlight:(scope:Scope)=>boolean;connected?:()=>Promise<boolean>}){}
  snapshot(scope:Scope):Control {
@@ -30,12 +30,14 @@ export class StaffConversationControl {
  describe(scope:Scope,capability?:unknown){
   const c=this.snapshot(scope),subject=this.verifyStaff(capability);let available=true;try{this.destination(scope)}catch{available=false}
   const draining=this.runtime.inFlight(scope),unresolved=this.unresolved(scope);
-  return {...c,available,authenticated:Boolean(subject),owned:Boolean(subject&&c.subject===subject),draining,unresolved,
-   canTakeover:Boolean(available&&subject&&c.mode==='AI'),canResume:Boolean(available&&subject&&c.mode==='HUMAN'&&c.subject===subject&&!draining&&!unresolved),
-   canSend:Boolean(available&&subject&&c.mode==='HUMAN'&&c.subject===subject&&!draining&&!unresolved)};
+  const permissions={send:Boolean(this.verifyStaff(capability,'CHAT_SEND',scope)),takeover:Boolean(this.verifyStaff(capability,'CHAT_TAKEOVER',scope)),resume:Boolean(this.verifyStaff(capability,'CHAT_RESUME',scope))};
+  return {...c,available,authenticated:Boolean(subject),permissions,owned:Boolean(subject&&c.subject===subject),draining,unresolved,
+   canTakeover:Boolean(available&&permissions.takeover&&c.mode==='AI'),canResume:Boolean(available&&permissions.resume&&c.mode==='HUMAN'&&c.subject===subject&&!draining&&!unresolved),
+   canSend:Boolean(available&&permissions.send&&c.mode==='HUMAN'&&c.subject===subject&&!draining&&!unresolved)};
  }
- private checked(input:Command){
+ private checked(input:Command,action:StaffChatAction){
   const subject=this.verifyStaff(input.capability);if(!subject)throw Error('STAFF_SESSION_REQUIRED');
+  if(this.verifyStaff(input.capability,action,input)!==subject)throw Error('STAFF_CHAT_PERMISSION_REQUIRED');
   if(!identifier(input.idempotencyKey)||!Number.isSafeInteger(input.expectedRevision)||input.expectedRevision<0)throw Error('STAFF_CHAT_COMMAND_INVALID');
   this.destination(input);return subject;
  }
@@ -46,9 +48,10 @@ export class StaffConversationControl {
   return {hash,event};
  }
  transition(input:Command&{action:'TAKEOVER'|'RESUME'}){
-  const subject=this.checked(input);if(!['TAKEOVER','RESUME'].includes(input.action))throw Error('STAFF_CHAT_COMMAND_INVALID');
+  input={...input};if(!['TAKEOVER','RESUME'].includes(input.action))throw Error('STAFF_CHAT_COMMAND_INVALID');const action=input.action==='TAKEOVER'?'CHAT_TAKEOVER':'CHAT_RESUME';
+  const subject=this.checked(input,action);
   return this.database.runImmediate(()=>this.database.runOutboundMutation(()=>{
-   this.destination(input);const {hash,event}=this.event(input,subject,input.action);if(event)return this.describe(input,input.capability);
+   this.checked(input,action);const {hash,event}=this.event(input,subject,input.action);if(event)return this.describe(input,input.capability);
    const current=this.snapshot(input);if(current.revision!==input.expectedRevision)throw Error('STAFF_CHAT_REVISION_CONFLICT');
    if(input.action==='TAKEOVER'&&current.mode!=='AI')throw Error('STAFF_CHAT_ALREADY_OWNED');
    if(input.action==='RESUME'&&(current.mode!=='HUMAN'||current.subject!==subject))throw Error('STAFF_CHAT_OWNER_REQUIRED');
@@ -69,6 +72,7 @@ export class StaffConversationControl {
  verifyManualWire(wire:OutgoingChannelMessage){
   const permit=this.permits.get(wire);if(!permit)return false;
   try{
+   if(this.verifyStaff(permit.capability,'CHAT_SEND',permit.scope)!==permit.subject)return false;
    const c=this.snapshot(permit.scope);if(c.mode!=='HUMAN'||c.subject!==permit.subject||c.revision!==permit.revision||this.runtime.inFlight(permit.scope))return false;
    if(wire.accountId!==permit.scope.accountId||wire.conversationId!==this.destination(permit.scope)||wire.attachments||wire.replyToExternalMessageId)return false;
    const row=this.database.db.prepare("SELECT text_hash FROM conversation_reply_journal WHERE client_message_id=? AND account_id=? AND conversation_id=? AND source='STAFF' AND state='UNKNOWN'").get(wire.clientMessageId,permit.scope.accountId,permit.scope.conversationId) as {text_hash:string}|undefined;
@@ -77,11 +81,11 @@ export class StaffConversationControl {
  }
  async send(input:Command&{text:string},outbound:{send:(message:OutgoingChannelMessage)=>Promise<ChannelSendResult>}){
   // Snapshot text/command fields before any async provider work.
-  input={...input};const subject=this.checked(input);if(typeof input.text!=='string'||!input.text.trim()||input.text.length>4000)throw Error('STAFF_CHAT_TEXT_INVALID');
+  input={...input};const subject=this.checked(input,'CHAT_SEND');if(typeof input.text!=='string'||!input.text.trim()||input.text.length>4000)throw Error('STAFF_CHAT_TEXT_INVALID');
   const connected=this.runtime.connected?await this.runtime.connected():true;
   const text=input.text,client='staff-'+digest([input.accountId,input.idempotencyKey]),journal=new ConversationReplyJournal(this.database);
   const prepared=this.database.runImmediate(()=>this.database.runOutboundMutation(()=>{
-   this.destination(input);const {hash,event}=this.event(input,subject,'SEND',text);
+   this.checked(input,'CHAT_SEND');const {hash,event}=this.event(input,subject,'SEND',text);
    if(event)return {duplicate:true,destination:null};
    if(!connected)throw Error('STAFF_CHAT_CHANNEL_UNAVAILABLE');
    this.owned(input,subject);if(this.runtime.inFlight(input)||this.unresolved(input))throw Error('STAFF_CHAT_DELIVERY_UNRESOLVED');
@@ -95,7 +99,7 @@ export class StaffConversationControl {
   }));
   if(!prepared.duplicate){
    const wire=Object.freeze({accountId:input.accountId,conversationId:prepared.destination!,clientMessageId:client,text});
-   this.permits.set(wire,{scope:{accountId:input.accountId,conversationId:input.conversationId},subject,revision:input.expectedRevision});
+   this.permits.set(wire,{scope:{accountId:input.accountId,conversationId:input.conversationId},subject,revision:input.expectedRevision,capability:input.capability});
    try{const result=await outbound.send(wire);journal.finalize(client,result)}catch{/* Provider/persistence ambiguity stays UNKNOWN. Never auto-retry. */}finally{this.permits.delete(wire)}
   }
   const disposition=this.database.db.prepare('SELECT state deliveryState FROM conversation_reply_journal WHERE client_message_id=?').get(client) as {deliveryState:string}|undefined;

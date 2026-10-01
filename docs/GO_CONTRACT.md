@@ -25,7 +25,7 @@ Use configured VMMCP/Codex roles; do not hard-code models:
 `MESSAGE -> intelligence -> QUOTATION.DRAFT -> QUOTATION.SENT -> QUOTATION.ACCEPTED -> SALES_ORDER.DRAFT -> HUMAN POST -> SALES_ORDER.POSTED -> HUMAN/OPS CONFIRMATION -> DO_READY`.
 
 ## Frozen approval boundary
-AI may create `SALES_ORDER.DRAFT` only. No AI-facing tool or API route may post/confirm a Sales Order or create a DO. Staff-only action is required after Draft SO.
+AI may create `SALES_ORDER.DRAFT` only. No AI-facing tool or API route may post/confirm a Sales Order or create a DO. Staff-only action is required after Draft SO. Chat-only human access does not satisfy commercial staff authorization: POST, CONFIRM and DO each require their own permission. Scoped chat SEND, TAKEOVER and RESUME each require their own unexpired, unrevoked capability for the exact canonical account/conversation.
 
 ## Required implementation properties
 - QR demo and future Meta adapter share one provider-neutral contract.

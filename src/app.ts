@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { V1Database } from './database.js';
 import { CommerceService, type OrderSemanticAgentFactory } from './commerce.js';
 import { SimulatedChannel, QrDemoAdapter, UnsupportedChannel, type WhatsAppChannelAdapter } from './channels.js';
-import { createStaffCapabilityAuthority, type StaffCapability } from './staff-auth.js';
+import { createStaffCapabilityAuthority, type StaffCapability, CHAT_ACTIONS } from './staff-auth.js';
 import { createV1ServiceSeams } from './v2-service-seams.js';
 import { requestedTransportMode } from './runtime-mode.js';
 import { V2RolloutService } from './v2-rollout.js';
@@ -33,11 +33,16 @@ import {renderConversationPrint} from './conversation-print.js';
 import {listConversations,selectedConversation} from './conversation-view.js';
 import {pairingOwnerControlFromEnv,type PairingOwnerControl} from './pairing-owner-auth.js';
 
+import {staffChatBootstrapFromEnv,snapshotStaffChatBootstrap,type StaffChatBootstrap} from './staff-chat-bootstrap.js';
+
 const STAFF_COOKIE = 'waerp_staff_session';
 const staffCookieSecure=()=>process.env.NODE_ENV==='production'?'; Secure':'';
 function parseCookies(header?: string): Record<string,string> { return Object.fromEntries((header??'').split(';').map(x=>x.trim()).filter(Boolean).map(x=>{const i=x.indexOf('=');return i<0?[x,'']:[x.slice(0,i),decodeURIComponent(x.slice(i+1))]})); }
 
-export function createApp(options: { dbFilename?: string; staffBootstrapCredential?: string; semanticAgentFactory?: OrderSemanticAgentFactory; demoDataset?: 'default'|'petshop'; startupMode?: 'active'|'paused'; prospectReplyScopes?:readonly ProspectReplyScope[]; pairingOwnerControl?:PairingOwnerControl; channel?:WhatsAppChannelAdapter; controlledTest?: {sendPolicy?:ControlledTestSendPolicy}; inquiryAccountId?:string } = {}) {
+export function createApp(options: { dbFilename?: string; staffBootstrapCredential?: string; staffChatBootstrap?: StaffChatBootstrap; semanticAgentFactory?: OrderSemanticAgentFactory; demoDataset?: 'default'|'petshop'; startupMode?: 'active'|'paused'; prospectReplyScopes?:readonly ProspectReplyScope[]; pairingOwnerControl?:PairingOwnerControl; channel?:WhatsAppChannelAdapter; controlledTest?: {sendPolicy?:ControlledTestSendPolicy}; inquiryAccountId?:string } = {}) {
+  const bootstrapCredential=options.staffBootstrapCredential ?? process.env.STAFF_BOOTSTRAP_CREDENTIAL;
+  const chatBootstrap=options.staffChatBootstrap?snapshotStaffChatBootstrap(options.staffChatBootstrap):staffChatBootstrapFromEnv(process.env);
+  if(chatBootstrap&&chatBootstrap.credential===bootstrapCredential)throw Error('STAFF_BOOTSTRAP_AMBIGUOUS');
   const app=Fastify({logger:false});
   const paused=options.startupMode==='paused';
   const requestedChannel=requestedTransportMode();
@@ -105,15 +110,17 @@ export function createApp(options: { dbFilename?: string; staffBootstrapCredenti
   const startupReady = (paused ? Promise.resolve() : channel.connect().then(async () => { if(!inquiry)await service.reconcileOutbound(); }).catch(error => { app.log.error({err:error},'channel startup failed'); throw error; }));
   channel.onMessage(async message=>{if(paused)return;try{await startupReady;if(inquiry)await inquiry.receiveFromChannel(message);else await receiveWithShadow(message)}catch(error){app.log.error({err:error},'channel inbound failed')}});
   const staffSessions=new Map<string,{subject:string;expiresAt:number;capability:StaffCapability}>();
-  const bootstrapCredential=options.staffBootstrapCredential ?? process.env.STAFF_BOOTSTRAP_CREDENTIAL;
-  const validBootstrap=(req:any)=>{
+  const matchesBootstrap=(req:any,credential:string|undefined)=>{
     const header=typeof req.headers?.authorization==='string'?req.headers.authorization:'';
     const supplied=header.startsWith('Bearer ')?header.slice(7):'';
-    if(!bootstrapCredential||!supplied)return false;
-    const a=Buffer.from(supplied),b=Buffer.from(bootstrapCredential);
+    if(!credential||!supplied)return false;
+    const a=Buffer.from(supplied),b=Buffer.from(credential);
     return a.length===b.length&&timingSafeEqual(a,b);
   };
-  const session=(req:{headers:{cookie?:string}})=>{const token=parseCookies(req.headers.cookie)[STAFF_COOKIE];if(!token)return undefined;const s=staffSessions.get(token);if(!s||s.expiresAt<=Date.now()){if(s)staffSessions.delete(token);return undefined}return{token,...s}};
+  const validBootstrap=(req:any)=>matchesBootstrap(req,bootstrapCredential);
+  const revokeSession=(token:string)=>{const s=staffSessions.get(token);if(s)staffAuthority.revoke(s.capability);staffSessions.delete(token)};
+  const session=(req:{headers:{cookie?:string}})=>{let token:string;try{token=parseCookies(req.headers.cookie)[STAFF_COOKIE]}catch{return undefined}if(!token)return undefined;const s=staffSessions.get(token);if(!s||s.expiresAt<=Date.now()||!staffAuthority.verify(s.capability)){if(s)revokeSession(token);return undefined}return{token,...s}};
+  app.addHook('onClose',async()=>{for(const token of staffSessions.keys())revokeSession(token)});
   const root=join(fileURLToPath(new URL('.',import.meta.url)),'../public');
   app.register(fastifyStatic,{root});
   app.get('/',async(_,r)=>r.sendFile('index.html'));
@@ -157,21 +164,31 @@ export function createApp(options: { dbFilename?: string; staffBootstrapCredenti
   app.get('/api/agent-trace',async(req:any,reply)=>{reply.header('cache-control','no-store');const selected=selection(req);if(!selected)return reply.code(404).send({error:'CONVERSATION_NOT_FOUND'});return projectAgentTrace(service.database.db,selected.accountId,selected.id)});
   app.get('/api/agent-harness',async()=>piHarness?piHarness.describe():{engine:'disabled',role:null,skills:[],tools:[],authority:'NONE'});
   app.post('/api/simulated/inbound',async(req:any,reply)=>{if(inquiry)return reply.code(503).send({error:'INQUIRY_TRUSTED_CHANNEL_REQUIRED'});await startupReady;const b=req.body??{};const input={channel:'whatsapp' as const,accountId:'demo-account',externalMessageId:b.externalMessageId??`api-${Date.now()}-${randomBytes(3).toString('hex')}`,conversationId:'conv-001',sender:{externalId:'+6591110001',phone:'+6591110001'},type:b.type??'text',text:b.text,occurredAt:new Date().toISOString()};return receiveWithShadow(input)});
-  app.get('/api/staff/session',async(req,reply)=>{reply.header('cache-control','no-store');const s=session(req);return{authenticated:Boolean(s),subject:s?.subject??null}});
-  app.post('/api/staff/session',async(req:any,reply)=>{if(!validBootstrap(req))return reply.code(401).send({error:'STAFF_BOOTSTRAP_REQUIRED'});const token=randomBytes(24).toString('base64url');staffSessions.set(token,{subject:'demo-staff',expiresAt:Date.now()+3600000,capability:staffAuthority.issue('demo-staff')});reply.header('set-cookie',`${STAFF_COOKIE}=${encodeURIComponent(token)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=3600${staffCookieSecure()}`);return{authenticated:true,subject:'demo-staff'}});
-  app.delete('/api/staff/session',async(req,reply)=>{const s=session(req);if(s)staffSessions.delete(s.token);reply.header('set-cookie',`${STAFF_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${staffCookieSecure()}`);return{authenticated:false}});
+  app.get('/api/staff/session',async(req,reply)=>{reply.header('cache-control','no-store');return staffAuthority.describe(session(req)?.capability)});
+  app.post('/api/staff/session',async(req:any,reply)=>{
+    reply.header('cache-control','no-store');
+    const chat=chatBootstrap&&matchesBootstrap(req,chatBootstrap.credential);
+    if((!chat&&!validBootstrap(req))||(chat&&chatBootstrap!.expiresAt<=Date.now()))return reply.code(401).send({error:'STAFF_BOOTSTRAP_REQUIRED'});
+    const expiresAt=Math.min(Date.now()+3600000,chat?chatBootstrap!.expiresAt:Infinity),subject=chat?chatBootstrap!.subject:'demo-staff';
+    const capability=staffAuthority.issue(subject,chat?{role:'CHAT_ONLY',accountId:chatBootstrap!.accountId,conversationIds:chatBootstrap!.conversationIds,actions:CHAT_ACTIONS,expiresAt}:{role:'LEGACY_STAFF',expiresAt});
+    const previous=session(req);if(previous)revokeSession(previous.token);
+    const token=randomBytes(24).toString('base64url');staffSessions.set(token,{subject,expiresAt,capability});
+    reply.header('set-cookie',`${STAFF_COOKIE}=${encodeURIComponent(token)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.max(0,Math.floor((expiresAt-Date.now())/1000))}${staffCookieSecure()}`);
+    return staffAuthority.describe(capability);
+  });
+  app.delete('/api/staff/session',async(req,reply)=>{reply.header('cache-control','no-store');const s=session(req);if(s)revokeSession(s.token);reply.header('set-cookie',`${STAFF_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${staffCookieSecure()}`);return{authenticated:false}});
   app.post('/api/staff/chat/:action',async(req:any,reply)=>{
     reply.header('cache-control','no-store');const s=session(req);if(!s)return reply.code(401).send({error:'STAFF_SESSION_REQUIRED'});
     // Custom header forces a same-origin browser request; Cross-Origin Resource
     // Sharing is not enabled. Access identity never issues a staff capability.
-    if(req.headers['x-waerp-staff-action']!=='1'||!String(req.headers['content-type']??'').startsWith('application/json')||req.headers['sec-fetch-site']==='cross-site')return reply.code(403).send({error:'STAFF_CHAT_SAME_ORIGIN_REQUIRED'});
+    if(req.headers['x-waerp-staff-action']!=='1'||!String(req.headers['content-type']??'').startsWith('application/json')||['cross-site','same-site'].includes(String(req.headers['sec-fetch-site'])))return reply.code(403).send({error:'STAFF_CHAT_SAME_ORIGIN_REQUIRED'});
     const b=req.body;if(!b||typeof b!=='object'||Array.isArray(b)||Object.keys(b).some(k=>!['conversationId','expectedRevision','idempotencyKey','text'].includes(k)))return reply.code(400).send({error:'STAFF_CHAT_COMMAND_INVALID'});
     if(typeof b.conversationId!=='string'||!b.conversationId||b.conversationId.length>200)return reply.code(400).send({error:'STAFF_CHAT_COMMAND_INVALID'});const selected=selectedConversation(service.database.db,currentAccountId(),b.conversationId);if(!selected)return reply.code(404).send({error:'CONVERSATION_NOT_FOUND'});
     const input={accountId:selected.accountId,conversationId:selected.id,capability:s.capability,expectedRevision:b.expectedRevision,idempotencyKey:b.idempotencyKey};
     try{if(req.params.action==='send')return await staffChat.send({...input,text:b.text},service.outbound);if(!['takeover','resume'].includes(req.params.action))return reply.code(400).send({error:'INVALID_STAFF_CHAT_ACTION'});return staffChat.transition({...input,action:req.params.action==='takeover'?'TAKEOVER':'RESUME'})}
-    catch(error){const code=(error as Error).message;return reply.code(code==='STAFF_CHAT_RUNTIME_UNAVAILABLE'?503:409).send({error:code.startsWith('STAFF_')?code:'STAFF_CHAT_FAILED'})}
+    catch(error){const code=(error as Error).message;return reply.code(code==='STAFF_CHAT_PERMISSION_REQUIRED'?403:code==='STAFF_SESSION_REQUIRED'?401:code==='STAFF_CHAT_RUNTIME_UNAVAILABLE'?503:409).send({error:code.startsWith('STAFF_')?code:'STAFF_CHAT_FAILED'})}
   });
-  app.post('/api/staff/:action',async(req:any,reply)=>{const s=session(req);if(!s)return reply.code(401).send({error:'STAFF_SESSION_REQUIRED'});const action=String(req.params.action);if(!['post','confirm','do'].includes(action))return reply.code(400).send({error:'INVALID_STAFF_ACTION'});try{const b=req.body??{};if(!b.salesOrderNo)return reply.code(400).send({error:'SALES_ORDER_REQUIRED'});return await seams.staffCommit.commit({action:action as 'post'|'confirm'|'do',capability:s.capability,idempotencyKey:b.idempotencyKey??`${s.subject}-${action}-${Date.now()}`,evidence:b.doubleConfirmationEvidence,salesOrderNo:String(b.salesOrderNo)})}catch(error){const message=(error as Error).message;return reply.code(message==='STOCK_SHORTAGE'||message==='INVALID_TRANSITION'?409:400).send({error:message})}});
-  app.post('/api/reset',async(req:any,reply)=>{if(inquiry)return reply.code(503).send({error:'INQUIRY_RESET_DISABLED'});if(!session(req)&&!validBootstrap(req))return reply.code(401).send({error:'STAFF_BOOTSTRAP_REQUIRED'});service.resetAndSeed();return service.state()});
+  app.post('/api/staff/:action',async(req:any,reply)=>{const s=session(req);if(!s)return reply.code(401).send({error:'STAFF_SESSION_REQUIRED'});const action=String(req.params.action);if(!['post','confirm','do'].includes(action))return reply.code(400).send({error:'INVALID_STAFF_ACTION'});try{const b=req.body??{};if(!b.salesOrderNo)return reply.code(400).send({error:'SALES_ORDER_REQUIRED'});return await seams.staffCommit.commit({action:action as 'post'|'confirm'|'do',capability:s.capability,idempotencyKey:b.idempotencyKey??`${s.subject}-${action}-${Date.now()}`,evidence:b.doubleConfirmationEvidence,salesOrderNo:String(b.salesOrderNo)})}catch(error){const message=(error as Error).message;return reply.code(message==='STAFF_PERMISSION_REQUIRED'?403:message==='STOCK_SHORTAGE'||message==='INVALID_TRANSITION'?409:400).send({error:message})}});
+  app.post('/api/reset',async(req:any,reply)=>{if(inquiry)return reply.code(503).send({error:'INQUIRY_RESET_DISABLED'});if(!staffAuthority.verify(session(req)?.capability,'RESET')&&!validBootstrap(req))return reply.code(401).send({error:'STAFF_BOOTSTRAP_REQUIRED'});service.resetAndSeed();return service.state()});
   return {app,service,channel,seams,rollout,v3Shadow,v3Canary,migrationAuthority,startupReady,staffChat};
 }

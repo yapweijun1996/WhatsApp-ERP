@@ -1,6 +1,6 @@
 import {test,expect} from '@playwright/test';
 import {useInboxFixtures,fixtureState} from './inbox-fixtures';
-const ai={mode:'AI',revision:0,subject:null,available:true,authenticated:true,owned:false,draining:false,unresolved:false,canTakeover:true,canSend:false,canResume:false};
+const ai={permissions:{send:true,takeover:true,resume:true},mode:'AI',revision:0,subject:null,available:true,authenticated:true,owned:false,draining:false,unresolved:false,canTakeover:true,canSend:false,canResume:false};
 const human={...ai,mode:'HUMAN',revision:1,subject:'synthetic-staff',owned:true,canTakeover:false,canSend:true,canResume:true};
 test('staff manually takes over, retains an uncertain request identity, and checks its outcome without a second provider submission',async({page})=>{
  await useInboxFixtures(page);let control={...ai},reply=false,attempts:any[]=[],providerCalls=0;

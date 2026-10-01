@@ -15,7 +15,11 @@ async function sendMessage(page: Page, text: string) {
 
 test('Legacy simulated fallback fails closed and preserves AI/staff boundary', async ({ page, request }) => {
   await page.goto('/');await page.locator('#navSettings').click();
-  await page.setExtraHTTPHeaders({ authorization: 'Bearer test-only-high-entropy-bootstrap' });
+  await page.locator('#staffLogin').click();
+  await page.locator('#staffBootstrap').fill('test-only-high-entropy-bootstrap');
+  await page.locator('#staffLoginSubmit').click();
+  await expect(page.locator('#staffLoginDialog')).not.toBeVisible();
+  await expect(page.locator('#reset')).toBeEnabled();
   await clickAndWait(page, '#reset', '/api/reset');
   await expect(page.locator('#authority')).toContainText('V1_ONLY');
   await expect(page.locator('#workspace')).toContainText('STAFF-ONLY BOUNDARY');
