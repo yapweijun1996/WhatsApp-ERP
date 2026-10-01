@@ -131,7 +131,14 @@ export class AccountInquiryController {
       if(exact?.enabled===0)throw Error('INQUIRY_WORKSPACE_PERMISSION_REVOKED');
       if(exact?.enabled===1)continue;
       const intent={action:'ENABLE' as const,capability,accountId:scope.accountId,conversationId:scope.conversationId,enabled:true};
-      this.rollout.configure({...intent,idempotencyKey:prefix+'-'+capability,approval:this.rolloutAuthority.issue(p.subject,intent)});
+      this.rollout.enableIfAbsent({...intent,idempotencyKey:prefix+'-'+capability,approval:this.rolloutAuthority.issue(p.subject,intent)},()=>{
+        // Re-read inside the first-grant writer transaction, not from the
+        // earlier absence/authority snapshot. Concurrent revocations win.
+        const current=this.policy();if(!current||current.revision!==p.revision)throw Error('INQUIRY_POLICY_CHANGED');
+        if(!this.database.db.prepare('SELECT 1 FROM conversations c JOIN customer_channel_identities i ON i.customer_id=c.customer_id AND i.channel_account_id=c.channel_account_id WHERE c.id=? AND c.channel_account_id=? AND c.customer_id=? AND i.external_id=? AND i.channel=?').get(scope.conversationId,scope.accountId,scope.customerId,canonical.message.sender.externalId,canonical.message.channel))throw Error('INQUIRY_VERIFIED_IDENTITY_REQUIRED');
+        const authority=this.database.db.prepare("SELECT revision,work_item_id,authoritative_writer,migration_state,quarantine_reason FROM workspace_authority WHERE account_id=? AND conversation_id=? AND work_item_type='SALES_ORDER_REQUEST'").get(scope.accountId,scope.conversationId) as typeof a|undefined;
+        if(!authority||authority.revision!==a.revision||authority.work_item_id!==a.work_item_id||authority.authoritative_writer!=='V2'||authority.quarantine_reason||authority.migration_state!==a.migration_state)throw Error('INQUIRY_WORKSPACE_AUTHORITY_CHANGED');
+      });
     }
     if(!V2_CAPABILITIES.every(capability=>this.rollout.evaluate({capability,accountId:scope.accountId,conversationId:scope.conversationId}).effectiveV2))throw Error('INQUIRY_WORKSPACE_PERMISSION_REQUIRED');
   }

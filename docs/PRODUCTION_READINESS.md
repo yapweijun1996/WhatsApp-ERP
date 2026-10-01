@@ -87,6 +87,10 @@ Verified existing canonical sender/customer binding is rechecked before exact
 conversation shadow import/promotion and the seven existing V2 capability grants.
 Opaque migration/rollout issuers retain descriptor binding, compatibility,
 quarantine and staff cutoff. Partial grant failures stay blocked and observable.
+First grants use a conditional insert in the rollout writer transaction, never an
+UPDATE of an existing permission. Concurrent exact DISABLE wins; policy, canonical
+binding and workspace revision/owner are re-read in that same transaction. Ignored
+insert or aborted approval-event persistence rolls back the grant and fails closed.
 
 The outgoing fence checks current policy/revision plus active fresh handling
 scope. Generic/prospect replies must target that account/external conversation and

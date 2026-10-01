@@ -8,6 +8,7 @@ import {CommerceService} from '../src/commerce.js';
 import {createMigrationApprovalAuthority} from '../src/migration-auth.js';
 import {createRolloutApprovalAuthority} from '../src/rollout-auth.js';
 import {V2RolloutService,V2_CAPABILITIES} from '../src/v2-rollout.js';
+import {WorkspaceMigrationService} from '../src/v2-workspace-migration.js';
 import {V2CanaryIngressRouter} from '../src/v2-canary-ingress-router.js';
 import {AccountInquiryController,createAccountInquiryApprovalAuthority,registerAccountInquiryPolicy} from '../src/account-inquiry-policy.js';
 import {V2TransportRuntime} from '../src/v2-transport-runtime.js';
@@ -98,4 +99,45 @@ test('authenticated PN and LID identities reuse only a uniquely matching existin
 });
 test('ambiguous verified phone evidence never chooses a customer or grants commerce',async()=>{
  const x=setup();try{x.db.db.prepare('INSERT INTO customers VALUES(?,?,?,?,?,?)').run('synthetic-second-customer','SYNTHETIC-SECOND','Synthetic second','SGD','OK','SG-MAIN');x.db.db.prepare('INSERT INTO customer_channel_identities VALUES(?,?,?,?,?,?)').run('synthetic-ambiguous-phone','synthetic-second-customer',x.input.accountId,'whatsapp','synthetic-other-identity',x.binding.phone);const pn=x.binding.phone.replace(/[^0-9]/g,'')+'@s.whatsapp.net';const incoming=normalizeBaileysMessage({key:{remoteJid:pn,id:'synthetic-ambiguous-inbound',fromMe:false},message:{conversation:'Synthetic public question'},messageTimestamp:Date.now()+10} as any,x.input.accountId)!;await x.controller.receiveFromChannel(incoming);assert.equal((x.db.db.prepare('SELECT count(*) n FROM customer_channel_identities WHERE external_id=?').get(pn) as any).n,0);assert.equal((x.db.db.prepare('SELECT count(*) n FROM workspace_authority').get() as any).n,0);assert.equal(x.counts().turns,0);assert.equal(x.counts().models,1);assert.equal(x.sent.length,1)}finally{x.db.db.close()}
+});
+
+test('a second connection exact DISABLE racing the first inquiry grant is never overwritten',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'waerp-inquiry-revoke-race-')),file=join(dir,'synthetic.db'),x=setup({file});
+ const approvals=createRolloutApprovalAuthority(),other=new V1Database(file,undefined,approvals),revoker=new V2RolloutService(other,approvals);
+ let raced=false;
+ const inject=(original:Function)=>(input:any,...rest:any[])=>{
+  if(!raced){raced=true;const intent={action:'DISABLE' as const,capability:input.capability,accountId:input.accountId,conversationId:input.conversationId,enabled:false};revoker.configure({...intent,idempotencyKey:'synthetic-racing-disable',approval:approvals.issue('synthetic-revoker',intent)})}
+  return original(input,...rest);
+ };
+ x.rollout.configure=inject(x.rollout.configure.bind(x.rollout)) as any;
+ const initial=(x.rollout as any).enableIfAbsent;if(initial)(x.rollout as any).enableIfAbsent=inject(initial.bind(x.rollout));
+ try{await assert.rejects(x.controller.receiveFromChannel(msg(x.input.accountId,'synthetic-revoke-race',x.binding.external_id)),/PERMISSION_REVOKED|EXPLICIT_DISABLE/);assert.equal(raced,true);assert.equal((other.db.prepare('SELECT enabled FROM v2_capability_rollouts').get() as any).enabled,0);assert.equal((other.db.prepare("SELECT count(*) n FROM v2_rollout_events WHERE action='ENABLE'").get() as any).n,0);assert.equal(x.counts().turns,0);assert.equal(x.sent.length,0);assert.equal((x.db.db.prepare('SELECT state FROM account_inquiry_admissions').get() as any).state,'FAILED')}
+ finally{other.db.close();x.db.db.close();rmSync(dir,{recursive:true,force:true})}
+});
+
+test('first grant rechecks policy, canonical binding and workspace authority inside its writer transaction',async()=>{
+ for(const change of ['policy','identity','workspace'] as const){
+  const dir=mkdtempSync(join(tmpdir(),'waerp-inquiry-stale-grant-')),file=join(dir,'synthetic.db'),x=setup({file});
+  const migration=createMigrationApprovalAuthority(),other=new V1Database(file,migration);let injected=false;
+  const original=x.rollout.enableIfAbsent.bind(x.rollout);
+  x.rollout.enableIfAbsent=(input,validate)=>{
+   if(!injected){injected=true;
+    if(change==='policy')other.db.prepare("UPDATE account_inquiry_policies SET status='REVOKED'").run();
+    if(change==='identity')other.db.prepare('DELETE FROM customer_channel_identities').run();
+    if(change==='workspace'){const service=new WorkspaceMigrationService(other,migration),a=service.getAuthority(input.accountId,input.conversationId),scope={accountId:input.accountId,conversationId:input.conversationId,customerId:x.binding.customer_id};const approval=migration.issue('synthetic-revoker','V1_OWNER','ROLLBACK',{...scope,expectedState:a.migration_state,expectedHash:a.legacy_source_hash??'',expectedRevision:a.revision,expectedWorkItemId:a.work_item_id??null,expectedDraftRevision:null,compatibilityConfirmed:null});service.rollback({...scope,idempotencyKey:'synthetic-concurrent-rollback',approval})}
+   }
+   return original(input,()=>{assert.equal(x.db.db.inTransaction,true);validate()});
+  };
+  try{await assert.rejects(x.controller.receiveFromChannel(msg(x.input.accountId,'synthetic-stale-'+change,x.binding.external_id)),/POLICY_CHANGED|VERIFIED_IDENTITY_REQUIRED|WORKSPACE_AUTHORITY_CHANGED/);assert.equal(injected,true);assert.equal((other.db.prepare('SELECT count(*) n FROM v2_capability_rollouts').get() as any).n,0);assert.equal(x.counts().turns,0);assert.equal(x.sent.length,0);assert.equal((x.db.db.prepare('SELECT state FROM account_inquiry_admissions').get() as any).state,'FAILED')}
+  finally{other.db.close();x.db.db.close();rmSync(dir,{recursive:true,force:true})}
+ }
+});
+
+test('ignored first-grant insert and aborted approval event cannot report or leave an enabled grant',async()=>{
+ for(const fault of ['ignore-insert','abort-event'] as const){const x=setup();try{
+  if(fault==='ignore-insert')x.db.db.exec("CREATE TRIGGER synthetic_ignore_initial_grant BEFORE INSERT ON v2_capability_rollouts BEGIN SELECT RAISE(IGNORE); END");
+  else x.db.db.exec("CREATE TRIGGER synthetic_abort_initial_event BEFORE INSERT ON v2_rollout_events BEGIN SELECT RAISE(ABORT,'SYNTHETIC_EVENT_FAULT'); END");
+  await assert.rejects(x.controller.receiveFromChannel(msg(x.input.accountId,'synthetic-grant-fault-'+fault,x.binding.external_id)),/INITIAL_GRANT_PERSISTENCE_REQUIRED|SYNTHETIC_EVENT_FAULT/);
+  assert.equal((x.db.db.prepare('SELECT count(*) n FROM v2_capability_rollouts').get() as any).n,0);assert.equal((x.db.db.prepare('SELECT count(*) n FROM v2_rollout_events').get() as any).n,0);assert.equal(x.counts().turns,0);assert.equal(x.sent.length,0);assert.equal((x.db.db.prepare('SELECT state FROM account_inquiry_admissions').get() as any).state,'FAILED');
+ }finally{x.db.db.close()}}
 });
