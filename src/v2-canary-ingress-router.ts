@@ -51,6 +51,7 @@ export class V2CanaryIngressRouter {
   /** The only ERP surface a prospect turn can reach: two bound public catalog reads. */
   private readonly prospectCatalog: PublicCatalogReadContract;
   private readonly drains = new Map<string, Promise<Map<string, unknown>>>();
+  private readonly inquiryTurns=new Map<string,{canonical:NonNullable<ReturnType<ConversationIngressPersistence['resolve']>>;token:object}>();
 
   constructor(private readonly database: V1Database, private readonly commerce: CommerceService, private readonly rollout: V2RolloutService, private readonly options: V2CanaryRouterOptions) {
     const scopes=options.prospectReplyScopes??[];
@@ -120,8 +121,10 @@ export class V2CanaryIngressRouter {
     const start: AgentTurnStart = { accountId:message.accountId, conversationId:message.conversationId, inboundMessageId:queued.item.messageId, profileId:'sales-digital-employee', nowIso:new Date().toISOString(), timezone:this.options.timezone ?? 'Asia/Singapore' };
     const turn = new AgentTurnCoordinator(this.database).start(start);
     this.queue.bindAgentTurn({ accountId:message.accountId, conversationId:message.conversationId, arrivalSeq:queued.item.arrivalSeq, turnId:turn.turnId });
-    const outcomes = await this.drainConversation(message.accountId, message.conversationId, runner);
-    return outcomes.get(turn.turnId) ?? this.commerce.state(message.conversationId);
+    const admissionKey=JSON.stringify([message.accountId,message.conversationId,message.externalMessageId]);
+    if(inquiryAdmission)this.inquiryTurns.set(admissionKey,{canonical,token:inquiryAdmission});
+    try{const outcomes = await this.drainConversation(message.accountId, message.conversationId, runner,Boolean(inquiryAdmission));return outcomes.get(turn.turnId) ?? this.commerce.state(message.conversationId)}
+    finally{if(inquiryAdmission)this.inquiryTurns.delete(admissionKey)}
   }
 
   /** Prospect handler: persist inbound, run abuse guard, send zero-token or onboarding reply.
@@ -269,6 +272,7 @@ export class V2CanaryIngressRouter {
     let deliveryState:'SUBMITTED'|'UNKNOWN'|'SUPPRESSED'='SUPPRESSED';
     const outbound=this.options.outbound as any;
     if(dest && !suppressReply && typeof outbound.send==='function') {
+      if(inquiryAdmission&&!this.options.verifyInquiryAdmission?.(inquiryAdmission,canonical))return {status:'FAIL_CLOSED',routeOutcome:'INQUIRY_ADMISSION_CHANGED',replySuppressed:true};
       const journal=new ConversationReplyJournal(this.database);
       const claimed=journal.claim({clientMessageId,accountId:message.accountId,conversationId:message.conversationId,source:'PROSPECT',sourceMessageId:message.externalMessageId,text:replyText},()=>{
         const dispatch=db.prepare("UPDATE prospect_reply_delivery SET state='UNKNOWN',updated_at=? WHERE account_id=? AND external_message_id=? AND state='CLAIMED'").run(new Date().toISOString(),message.accountId,message.externalMessageId);
@@ -421,7 +425,7 @@ export class V2CanaryIngressRouter {
     return elapsed >= 0 && elapsed < PROSPECT_AI_FALLBACK_COOLDOWN_MS;
   }
 
-  private async drainConversation(accountId:string, conversationId:string, runner?: CanonicalTurnRunner):Promise<Map<string, unknown>> {
+  private async drainConversation(accountId:string, conversationId:string, runner?: CanonicalTurnRunner,requireInquiryAdmission=false):Promise<Map<string, unknown>> {
     const key=`${accountId}\u0000${conversationId}`;
     const prior=this.drains.get(key) ?? Promise.resolve(new Map<string, unknown>());
     const next=prior.catch(()=>new Map<string, unknown>()).then(async()=>{
@@ -443,9 +447,13 @@ export class V2CanaryIngressRouter {
         }
         const claimedStart:AgentTurnStart={accountId,conversationId,inboundMessageId:turnRow.inbound_message_id,profileId:turnRow.profile_id,nowIso:new Date().toISOString(),timezone:turnRow.timezone};
         try {
+          const inbound=this.database.db.prepare('SELECT external_message_id FROM messages WHERE id=? AND account_id=? AND conversation_id=?').get(turnRow.inbound_message_id,accountId,conversationId) as {external_message_id:string}|undefined;
+          const inquiry=inbound?this.inquiryTurns.get(JSON.stringify([accountId,conversationId,inbound.external_message_id])):undefined;
+          const checkInquiry=()=>{if(requireInquiryAdmission&&(!inquiry||!this.options.verifyInquiryAdmission?.(inquiry.token,inquiry.canonical)))throw Error('INQUIRY_ADMISSION_CHANGED')};
+          checkInquiry();
           try { this.queue.markSideEffectStarted({accountId,conversationId,owner:lease.leaseOwner,leaseToken:lease.leaseToken,arrivalSeq:lease.arrivalSeq,turnId:turnRow.id}); }
           catch(error){ if(String(error).includes('NEWER_INPUT_QUEUED')) continue; throw error; }
-          const execute=(action:any,signal?:AbortSignal)=>this.executor.execute(action,signal);
+          const execute=(action:any,signal?:AbortSignal)=>{checkInquiry();return this.executor.execute(action,signal)};
           await this.emitPresence('sendPresenceComposing',conversationId);
           try {
             const outcome:any=runner

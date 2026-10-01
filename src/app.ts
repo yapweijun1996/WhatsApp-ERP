@@ -1,6 +1,7 @@
 import {AccountInquiryController} from './account-inquiry-policy.js';
 import {effectiveRuntimeStatus} from './effective-runtime-status.js';
 import {conversationMessageFeed} from './conversation-message-feed.js';
+import {StaffConversationControl} from './staff-conversation-control.js';
 import {installControlledTestSendGuard,type ControlledTestSendPolicy} from './controlled-test-send-guard.js';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import Fastify from 'fastify';
@@ -71,6 +72,7 @@ export function createApp(options: { dbFilename?: string; staffBootstrapCredenti
   // scope is reachable from the ProspectModelCaller interface.
   const prospectModel = demoSession ? createProspectModelCaller(demoSession) : undefined;
   let inquiry:AccountInquiryController|undefined;
+  const staffChat=new StaffConversationControl(service.database,staffAuthority.verify,{accountId:options.inquiryAccountId,enabled:()=>!paused&&Boolean(inquiry?.describe().enabled),inFlight:scope=>inquiry?.isInFlight(scope)??false,connected:async()=>await channel.getStatus()==='connected'});
   const v2Router=new V2CanaryIngressRouter(service.database,service,rollout,{enabled:canaryEnabled,prospectReplyScopes:options.prospectReplyScopes,verifyInquiryAdmission:(token,canonical)=>inquiry?.verifyAdmission(token,canonical)??false,piHarness,outbound:service.outbound,allowLegacyFallback,prospectModel});
   // The live V3 bridge is present but fail-closed: activation still requires
   // the process-local opaque MIG-003 approval and an explicitly supplied V3
@@ -94,7 +96,7 @@ export function createApp(options: { dbFilename?: string; staffBootstrapCredenti
   if(!options.inquiryAccountId)service.ensureSeeded();
   if(options.inquiryAccountId){
     if(!canaryEnabled||!piHarness)throw Error('INQUIRY_REAL_RUNTIME_CONFIG_REQUIRED');
-    inquiry=new AccountInquiryController(service.database,options.inquiryAccountId,v2Router,migrationAuthority,rollout,rolloutAuthority);
+    inquiry=new AccountInquiryController(service.database,options.inquiryAccountId,v2Router,migrationAuthority,rollout,rolloutAuthority,staffChat);
     inquiry.installReplyFence(channel);
   }
 
@@ -148,17 +150,28 @@ export function createApp(options: { dbFilename?: string; staffBootstrapCredenti
     if(!selected)return reply.code(404).send({error:'CONVERSATION_NOT_FOUND'});
     const conversationId=selected.id,accountId=selected.accountId;
     const feed=conversationMessageFeed(service.database.db,accountId,conversationId);
-    const state={...service.state(conversationId),...feed,phone:selected.phone??'',conversation:selected,operational:{...projectOperational().operational,startupMode:paused?'paused':'active',agentRuntime:piHarness?'pi-harness':'legacy-or-disabled'},v3Shadow:v3Shadow.telemetry({accountId,conversationId})};const s=session(req);
+    const s=session(req),chatControl=staffChat.describe({accountId,conversationId},s?.capability),connected=await channel.getStatus()==='connected';const state={...service.state(conversationId),...feed,staffChat:{...chatControl,connected,canSend:chatControl.canSend&&connected},phone:selected.phone??'',conversation:selected,operational:{...projectOperational().operational,startupMode:paused?'paused':'active',agentRuntime:piHarness?'pi-harness':'legacy-or-disabled'},v3Shadow:v3Shadow.telemetry({accountId,conversationId})};
     return s?{...state,rollout:rollout.telemetry({accountId,conversationId})}:{...state,rollout:{detail:'STAFF_SESSION_REQUIRED'}}
   });
   app.get('/api/print',async(req:any,reply)=>{reply.header('cache-control','no-store');const selected=selection(req);if(!selected)return reply.code(404).send({error:'CONVERSATION_NOT_FOUND'});reply.header('content-security-policy',"default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'");reply.header('x-content-type-options','nosniff');return reply.type('text/html; charset=utf-8').send(renderConversationPrint(service.state(selected.id),selected))});
   app.get('/api/agent-trace',async(req:any,reply)=>{reply.header('cache-control','no-store');const selected=selection(req);if(!selected)return reply.code(404).send({error:'CONVERSATION_NOT_FOUND'});return projectAgentTrace(service.database.db,selected.accountId,selected.id)});
   app.get('/api/agent-harness',async()=>piHarness?piHarness.describe():{engine:'disabled',role:null,skills:[],tools:[],authority:'NONE'});
   app.post('/api/simulated/inbound',async(req:any,reply)=>{if(inquiry)return reply.code(503).send({error:'INQUIRY_TRUSTED_CHANNEL_REQUIRED'});await startupReady;const b=req.body??{};const input={channel:'whatsapp' as const,accountId:'demo-account',externalMessageId:b.externalMessageId??`api-${Date.now()}-${randomBytes(3).toString('hex')}`,conversationId:'conv-001',sender:{externalId:'+6591110001',phone:'+6591110001'},type:b.type??'text',text:b.text,occurredAt:new Date().toISOString()};return receiveWithShadow(input)});
-  app.get('/api/staff/session',async req=>{const s=session(req);return{authenticated:Boolean(s),subject:s?.subject??null}});
+  app.get('/api/staff/session',async(req,reply)=>{reply.header('cache-control','no-store');const s=session(req);return{authenticated:Boolean(s),subject:s?.subject??null}});
   app.post('/api/staff/session',async(req:any,reply)=>{if(!validBootstrap(req))return reply.code(401).send({error:'STAFF_BOOTSTRAP_REQUIRED'});const token=randomBytes(24).toString('base64url');staffSessions.set(token,{subject:'demo-staff',expiresAt:Date.now()+3600000,capability:staffAuthority.issue('demo-staff')});reply.header('set-cookie',`${STAFF_COOKIE}=${encodeURIComponent(token)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=3600${staffCookieSecure()}`);return{authenticated:true,subject:'demo-staff'}});
   app.delete('/api/staff/session',async(req,reply)=>{const s=session(req);if(s)staffSessions.delete(s.token);reply.header('set-cookie',`${STAFF_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${staffCookieSecure()}`);return{authenticated:false}});
+  app.post('/api/staff/chat/:action',async(req:any,reply)=>{
+    reply.header('cache-control','no-store');const s=session(req);if(!s)return reply.code(401).send({error:'STAFF_SESSION_REQUIRED'});
+    // Custom header forces a same-origin browser request; Cross-Origin Resource
+    // Sharing is not enabled. Access identity never issues a staff capability.
+    if(req.headers['x-waerp-staff-action']!=='1'||!String(req.headers['content-type']??'').startsWith('application/json')||req.headers['sec-fetch-site']==='cross-site')return reply.code(403).send({error:'STAFF_CHAT_SAME_ORIGIN_REQUIRED'});
+    const b=req.body;if(!b||typeof b!=='object'||Array.isArray(b)||Object.keys(b).some(k=>!['conversationId','expectedRevision','idempotencyKey','text'].includes(k)))return reply.code(400).send({error:'STAFF_CHAT_COMMAND_INVALID'});
+    if(typeof b.conversationId!=='string'||!b.conversationId||b.conversationId.length>200)return reply.code(400).send({error:'STAFF_CHAT_COMMAND_INVALID'});const selected=selectedConversation(service.database.db,currentAccountId(),b.conversationId);if(!selected)return reply.code(404).send({error:'CONVERSATION_NOT_FOUND'});
+    const input={accountId:selected.accountId,conversationId:selected.id,capability:s.capability,expectedRevision:b.expectedRevision,idempotencyKey:b.idempotencyKey};
+    try{if(req.params.action==='send')return await staffChat.send({...input,text:b.text},service.outbound);if(!['takeover','resume'].includes(req.params.action))return reply.code(400).send({error:'INVALID_STAFF_CHAT_ACTION'});return staffChat.transition({...input,action:req.params.action==='takeover'?'TAKEOVER':'RESUME'})}
+    catch(error){const code=(error as Error).message;return reply.code(code==='STAFF_CHAT_RUNTIME_UNAVAILABLE'?503:409).send({error:code.startsWith('STAFF_')?code:'STAFF_CHAT_FAILED'})}
+  });
   app.post('/api/staff/:action',async(req:any,reply)=>{const s=session(req);if(!s)return reply.code(401).send({error:'STAFF_SESSION_REQUIRED'});const action=String(req.params.action);if(!['post','confirm','do'].includes(action))return reply.code(400).send({error:'INVALID_STAFF_ACTION'});try{const b=req.body??{};if(!b.salesOrderNo)return reply.code(400).send({error:'SALES_ORDER_REQUIRED'});return await seams.staffCommit.commit({action:action as 'post'|'confirm'|'do',capability:s.capability,idempotencyKey:b.idempotencyKey??`${s.subject}-${action}-${Date.now()}`,evidence:b.doubleConfirmationEvidence,salesOrderNo:String(b.salesOrderNo)})}catch(error){const message=(error as Error).message;return reply.code(message==='STOCK_SHORTAGE'||message==='INVALID_TRANSITION'?409:400).send({error:message})}});
   app.post('/api/reset',async(req:any,reply)=>{if(inquiry)return reply.code(503).send({error:'INQUIRY_RESET_DISABLED'});if(!session(req)&&!validBootstrap(req))return reply.code(401).send({error:'STAFF_BOOTSTRAP_REQUIRED'});service.resetAndSeed();return service.state()});
-  return {app,service,channel,seams,rollout,v3Shadow,v3Canary,migrationAuthority,startupReady};
+  return {app,service,channel,seams,rollout,v3Shadow,v3Canary,migrationAuthority,startupReady,staffChat};
 }
