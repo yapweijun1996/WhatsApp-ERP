@@ -110,3 +110,14 @@ customer/account/conversation migration and seven capability rows, never guessed
 customer assignment/global default. Reviewed registration also covers these evidence-derived aliases, not guessed identity assignments. Persistent registration/activation must pass
 action-time review before executing. Settings exposes server provider/model/runtime
 and managed-gateway billing mode without keys or BYOK/OAuth/subscription setup.
+
+### Effective runtime status
+Health and selected-conversation operational status share the effective host
+projection. Existing runtimeMode/v2TrafficEnabled field names remain compatible:
+an active approved inquiry policy with configured Pi/V2 reports V2/true and
+SCOPED, never a global rollout. Paused composition reports PAUSED/OFF; configured
+model/environment alone does not enable inquiry. Revoked policy reports BLOCKED,
+not a working V1 fallback. Settings prefers this projection and can derive scoped
+status from existing inquiry/Pi/rollout metadata while older Phase0 labels remain
+in a pre-upgrade backend. These fields report readiness, not evidence of a live
+model request, provider submission, physical delivery or customer acceptance.

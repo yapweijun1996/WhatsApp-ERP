@@ -1,4 +1,5 @@
 import {AccountInquiryController} from './account-inquiry-policy.js';
+import {effectiveRuntimeStatus} from './effective-runtime-status.js';
 import {installControlledTestSendGuard,type ControlledTestSendPolicy} from './controlled-test-send-guard.js';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import Fastify from 'fastify';
@@ -10,7 +11,7 @@ import { CommerceService, type OrderSemanticAgentFactory } from './commerce.js';
 import { SimulatedChannel, QrDemoAdapter, UnsupportedChannel, type WhatsAppChannelAdapter } from './channels.js';
 import { createStaffCapabilityAuthority, type StaffCapability } from './staff-auth.js';
 import { createV1ServiceSeams } from './v2-service-seams.js';
-import { requestedTransportMode, runtimeTelemetry } from './runtime-mode.js';
+import { requestedTransportMode } from './runtime-mode.js';
 import { V2RolloutService } from './v2-rollout.js';
 import { createRolloutApprovalAuthority } from './rollout-auth.js';
 import { runV2Eval002 } from './v2-eval-002-harness.js';
@@ -114,7 +115,8 @@ export function createApp(options: { dbFilename?: string; staffBootstrapCredenti
   app.register(fastifyStatic,{root});
   app.get('/',async(_,r)=>r.sendFile('index.html'));
   app.addHook('onRequest',async(req,reply)=>{if(paused&&!(req.method==='POST'&&req.url.split('?')[0]==='/api/channel/pairing')&&['POST','PUT','PATCH','DELETE'].includes(req.method))return reply.code(503).send({error:'MIGRATION_RUNTIME_PAUSED'})});
-  app.get('/health',async()=>{const operational=runtimeTelemetry();const channel=process.env.ORDER_CHANNEL??process.env.WHATSAPP_CHANNEL??'simulated';return{ok:true,startupMode:paused?'paused':'active',channel,...operational,agentRuntime:piHarness?'pi-harness':'legacy-or-disabled',rollout:{v2Traffic:inquiry?'SCOPED':'OFF',v3Shadow:inquiry?'OFF':'PROPOSED'},inquiry:inquiry?.describe()??{enabled:false},llm:{provider:demoSession?'demo-gpt':null,model:demoSession?demoConfig.model:null,runtime:piHarness?'pi-harness-node':'disabled',billingMode:demoSession?'managed-demo-gateway':'disabled'}}});
+  const projectOperational=()=>{const inquiryStatus=inquiry?.describe()??{enabled:false};return{inquiryStatus,operational:effectiveRuntimeStatus({paused,inquiryConfigured:Boolean(inquiry),inquiryApproved:inquiryStatus.enabled,piConfigured:Boolean(piHarness),v2Configured:canaryEnabled})}};
+  app.get('/health',async()=>{const {inquiryStatus,operational}=projectOperational();const channel=process.env.ORDER_CHANNEL??process.env.WHATSAPP_CHANNEL??'simulated';return{ok:true,startupMode:paused?'paused':'active',channel,...operational,agentRuntime:piHarness?'pi-harness':'legacy-or-disabled',rollout:{v2Traffic:operational.effectiveRuntime.v2Traffic,v3Shadow:inquiry?'OFF':'PROPOSED'},inquiry:inquiryStatus,llm:{provider:demoSession?'demo-gpt':null,model:demoSession?demoConfig.model:null,runtime:piHarness?'pi-harness-node':'disabled',billingMode:demoSession?'managed-demo-gateway':'disabled'}}});
   if (process.env.NODE_ENV === 'test' && process.env.V2_EVAL_002_SURFACE === '1') app.get('/api/test-only/v2-eval-002', async () => runV2Eval002());
   const channelStatus=async()=>({...('getStatusInfo' in channel ? (channel as any).getStatusInfo() : {status:await channel.getStatus(),mode:'simulated',adapter:'WhatsAppChannelAdapter',qrReady:false,qr:null}),pairingControl:{enabled:Boolean(paused&&isQr&&pairingOwner),processingPaused:paused}});
   app.get('/api/channel/status',async(_,reply)=>{reply.header('cache-control','no-store');return channelStatus()});
@@ -145,7 +147,7 @@ export function createApp(options: { dbFilename?: string; staffBootstrapCredenti
     if(!selected)return reply.code(404).send({error:'CONVERSATION_NOT_FOUND'});
     const conversationId=selected.id,accountId=selected.accountId;
     const messages=(service.database.db.prepare('SELECT id,direction,text,message_type messageType,occurred_at occurredAt FROM messages WHERE conversation_id=? AND account_id=? ORDER BY rowid').all(conversationId,accountId) as any[]).map(m=>({...m,from:m.direction==='INBOUND'?'customer':'ai'}));
-    const state={...service.state(conversationId),messages,phone:selected.phone??'',conversation:selected,operational:{...runtimeTelemetry(),startupMode:paused?'paused':'active',agentRuntime:piHarness?'pi-harness':'legacy-or-disabled'},v3Shadow:v3Shadow.telemetry({accountId,conversationId})};const s=session(req);
+    const state={...service.state(conversationId),messages,phone:selected.phone??'',conversation:selected,operational:{...projectOperational().operational,startupMode:paused?'paused':'active',agentRuntime:piHarness?'pi-harness':'legacy-or-disabled'},v3Shadow:v3Shadow.telemetry({accountId,conversationId})};const s=session(req);
     return s?{...state,rollout:rollout.telemetry({accountId,conversationId})}:{...state,rollout:{detail:'STAFF_SESSION_REQUIRED'}}
   });
   app.get('/api/print',async(req:any,reply)=>{reply.header('cache-control','no-store');const selected=selection(req);if(!selected)return reply.code(404).send({error:'CONVERSATION_NOT_FOUND'});reply.header('content-security-policy',"default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'");reply.header('x-content-type-options','nosniff');return reply.type('text/html; charset=utf-8').send(renderConversationPrint(service.state(selected.id),selected))});
