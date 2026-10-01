@@ -54,7 +54,7 @@ function makeHarness(prospectModel?: ProspectModelCaller) {
     enabled: true,
     prospectReplyScopes:TEST_PROSPECT_SCOPES,
 
-    outbound: { send: async (m: any) => { sent.push(m.text); } } as any,
+    outbound: { send: async (m: any) => { sent.push(m.text); return {status:'submitted',externalMessageId:'synthetic-provider-id',submittedAt:new Date().toISOString()};} } as any,
     prospectModel,
   });
   // Canonicalization maps the external conversation to an internal id; audits and

@@ -27,3 +27,17 @@ Validation: 1027 full offline tests, 114 focused identity/commerce/acceptance/re
 Customer workspace authority never authorizes a prospect reply. Prospect replies default denied and require a separate host-supplied exact `(accountId, externalConversationId)` allowlist. No wildcard/global entry is supported. An unapproved prospect inbound is persisted and marked SUPPRESSED with a bounded route audit; it performs zero model/catalog/provider calls. Approval changes cannot auto-replay historical suppressed messages. An authorized fresh inbound still runs existing abuse, freshness, catalog grounding and sole-outbound-owner controls. The allowlist is copied at construction so caller mutation cannot widen a running router. This branch configures no real allowlist or grants.
 
 Release candidate verification: 1032 full offline tests and 13 browser tests pass under the CI environment (NODE_ENV=test, simulated channel, demo gateway/V2 disabled). The full journey test uses actual canonical identity, versioned V2 coordinator/executor tools, deterministic catalog/validation, quotation submission through intercepted provider, explicit acceptance -> DRAFT, staff auth/evidence/idempotency, read-only print and persistent SQLite reopen. It does not claim real model or physical provider delivery. Prospect guard focused suite: 91 pass. CI is bounded to 15 minutes, Node24.20.0/Ubuntu24.04, read-only GitHub token, pinned official actions, no deployment or app credentials.
+
+
+### Prospect replay and delivery recovery
+An account/provider-message terminal prospect decision remains terminal after
+verified customer binding or V2 workspace authorization. Distinct new message IDs
+remain eligible under the normal exact scope checks. Existing audit rows survive.
+Prospect processing atomically claims a durable `prospect_reply_delivery` row
+before model/catalog awaits. Client message identity is stable by account/provider
+message ID. `UNKNOWN` is written before calling the sole outbound sender; a crash,
+throw, failed or ambiguous result is never automatically resent. `CLAIMED` after a
+crash is also held for explicit review. A submitted result is provider submission,
+not physical receipt or exactly-once delivery. Recovery requires reviewed provider
+evidence; no timed retry, ledger deletion or global reset is authorized. This is a
+fail-closed availability tradeoff pending owner review before production release.

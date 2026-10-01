@@ -101,7 +101,7 @@ function makeHarness(prospectModel?: ProspectModelCaller) {
     enabled: true,
     prospectReplyScopes:TEST_PROSPECT_SCOPES,
 
-    outbound: { send: async (m: any) => { sent.push({ conversationId: m.conversationId, text: m.text }); } } as any,
+    outbound: { send: async (m: any) => { sent.push({ conversationId: m.conversationId, text: m.text }); return {status:'submitted',externalMessageId:'synthetic-provider-id',submittedAt:new Date().toISOString()}; } } as any,
     prospectModel,
   });
   const internalIds = new Map<string, string>();
@@ -722,7 +722,7 @@ test('the verified customer path is unaffected by the public catalog surface', a
     prospectReplyScopes:TEST_PROSPECT_SCOPES,
 
     allowLegacyFallback: true,
-    outbound: { send: async () => {} } as any,
+    outbound: { send: async () => {return {status:'submitted',externalMessageId:'synthetic-provider-id',submittedAt:new Date().toISOString()};} } as any,
     prospectModel: model,
   });
 

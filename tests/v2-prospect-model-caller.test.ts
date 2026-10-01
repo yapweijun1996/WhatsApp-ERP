@@ -144,7 +144,7 @@ test('NORMAL prospect with factory-backed prospectModel receives AI reply', asyn
     prospectReplyScopes:TEST_PROSPECT_SCOPES,
 
     allowLegacyFallback: true,
-    outbound: { send: async (msg: any) => { sentText = msg.text; } } as any,
+    outbound: { send: async (msg: any) => { sentText = msg.text; return {status:'submitted',externalMessageId:'synthetic-provider-id',submittedAt:new Date().toISOString()};} } as any,
     prospectModel,
   });
 
@@ -182,7 +182,7 @@ test('absent prospectModel (demoSession unavailable) falls back to static onboar
     prospectReplyScopes:TEST_PROSPECT_SCOPES,
 
     allowLegacyFallback: true,
-    outbound: { send: async (msg: any) => { sentText = msg.text; } } as any,
+    outbound: { send: async (msg: any) => { sentText = msg.text; return {status:'submitted',externalMessageId:'synthetic-provider-id',submittedAt:new Date().toISOString()};} } as any,
     // prospectModel intentionally omitted
   });
 
@@ -217,7 +217,7 @@ test('session error causes ProspectSemanticRouter to fail-closed to onboarding r
     prospectReplyScopes:TEST_PROSPECT_SCOPES,
 
     allowLegacyFallback: true,
-    outbound: { send: async (msg: any) => { sentText = msg.text; } } as any,
+    outbound: { send: async (msg: any) => { sentText = msg.text; return {status:'submitted',externalMessageId:'synthetic-provider-id',submittedAt:new Date().toISOString()};} } as any,
     prospectModel,
   });
 
@@ -268,7 +268,7 @@ test('SUSPICIOUS state: factory-backed prospectModel is NOT called (zero model c
     prospectReplyScopes:TEST_PROSPECT_SCOPES,
 
     allowLegacyFallback: true,
-    outbound: { send: async () => {} } as any,
+    outbound: { send: async () => {return {status:'submitted',externalMessageId:'synthetic-provider-id',submittedAt:new Date().toISOString()};} } as any,
     prospectModel,
   });
 
@@ -300,7 +300,7 @@ test('COOLDOWN state: factory-backed prospectModel is NOT called', async () => {
     prospectReplyScopes:TEST_PROSPECT_SCOPES,
 
     allowLegacyFallback: true,
-    outbound: { send: async () => {} } as any,
+    outbound: { send: async () => {return {status:'submitted',externalMessageId:'synthetic-provider-id',submittedAt:new Date().toISOString()};} } as any,
     prospectModel: createProspectModelCaller(session),
   });
 
@@ -331,7 +331,7 @@ test('BLOCKED state: factory-backed prospectModel is NOT called', async () => {
     prospectReplyScopes:TEST_PROSPECT_SCOPES,
 
     allowLegacyFallback: true,
-    outbound: { send: async () => {} } as any,
+    outbound: { send: async () => {return {status:'submitted',externalMessageId:'synthetic-provider-id',submittedAt:new Date().toISOString()};} } as any,
     prospectModel: createProspectModelCaller(session),
   });
 
@@ -363,7 +363,7 @@ test('NORMAL prospect with prospectModel is NOT bound to CUST-001 or any custome
     prospectReplyScopes:TEST_PROSPECT_SCOPES,
 
     allowLegacyFallback: true,
-    outbound: { send: async () => {} } as any,
+    outbound: { send: async () => {return {status:'submitted',externalMessageId:'synthetic-provider-id',submittedAt:new Date().toISOString()};} } as any,
     prospectModel: createProspectModelCaller(session),
   });
 
@@ -403,7 +403,7 @@ test('verified customer (CUST-001) canonicalize is unaffected by prospectModel p
     prospectReplyScopes:TEST_PROSPECT_SCOPES,
 
     allowLegacyFallback: true,
-    outbound: { send: async () => {} } as any,
+    outbound: { send: async () => {return {status:'submitted',externalMessageId:'synthetic-provider-id',submittedAt:new Date().toISOString()};} } as any,
     prospectModel: createProspectModelCaller(session),
   });
 
@@ -432,7 +432,7 @@ test('PROSPECT_HANDLED result never contains sales order data regardless of pros
     prospectReplyScopes:TEST_PROSPECT_SCOPES,
 
     allowLegacyFallback: true,
-    outbound: { send: async () => {} } as any,
+    outbound: { send: async () => {return {status:'submitted',externalMessageId:'synthetic-provider-id',submittedAt:new Date().toISOString()};} } as any,
     prospectModel: createProspectModelCaller(session),
   });
 
