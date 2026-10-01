@@ -701,3 +701,16 @@ CREATE TABLE IF NOT EXISTS controlled_test_send_attempts(
  client_message_id TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN ('UNKNOWN','SUBMITTED','FAILED')),attempted_at TEXT NOT NULL,
  PRIMARY KEY(policy_id,ordinal)
 );
+
+-- Owner-approved account inquiry scope. Runtime boot only reads this policy.
+CREATE TABLE IF NOT EXISTS account_inquiry_policies(
+ account_id TEXT PRIMARY KEY,approval_ref TEXT NOT NULL,subject TEXT NOT NULL,activated_at TEXT NOT NULL,
+ revision INTEGER NOT NULL CHECK(revision>0),status TEXT NOT NULL CHECK(status IN ('APPROVED','REVOKED')),
+ boundary TEXT NOT NULL CHECK(boundary='SALES_ORDER.DRAFT')
+);
+CREATE TABLE IF NOT EXISTS account_inquiry_admissions(
+ account_id TEXT NOT NULL,external_message_id TEXT NOT NULL,conversation_id TEXT NOT NULL,customer_id TEXT,
+ policy_revision INTEGER NOT NULL,occurred_at TEXT NOT NULL,admitted_at TEXT NOT NULL,
+ state TEXT NOT NULL CHECK(state IN ('ADMITTED','COMPLETED','FAILED')),error_code TEXT,
+ PRIMARY KEY(account_id,external_message_id)
+);

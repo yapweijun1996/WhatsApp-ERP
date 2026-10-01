@@ -66,3 +66,43 @@ supported. Owner-approved future windows require separate reviewed handling.
 Do not activate processing or configure a real policy from this code release.
 No recipient, model or provider was contacted by its synthetic tests. Submitted
 means provider submission, not physical delivery or exactly-once semantics.
+
+
+### Approved account inbound inquiry policy (source preparation, not activated)
+Owner Sentinel_ec4ca4e3d0a08191af8f108d1d0c92af authorizes the already paired
+account's incoming customer consultations, product Q&A, quotations and
+SALES_ORDER.DRAFT only. No payment, posting, confirmation, shipping or V3.
+Do not repeat that scope question or require a controlled test number for
+inquiry-only engineering readiness. Physical test sends remain separate.
+
+A reviewed host-only opaque approval registers one account policy with its owner
+reference and activation time. App boot never registers policy/grants or seeds demo customers/products for inquiry mode. Registration requires the existing canonical channel-account row. Only the
+actual normalized channel callback admits new direct-contact messages after that
+time. Imported/paused history and previously admitted messages cannot become new
+work; HTTP simulation/reset cannot enter this path. No wildcard/account-wide V2
+capability rollout is written. Unknown contacts retain null customer identity and
+reach only the existing bounded public-catalog prospect seam using an opaque,
+per-message admission; model text or a customer code never creates a binding. Authenticated PN/LID transport metadata may add an alias only to one uniquely matching existing verified phone/customer relation; ambiguous/unknown numbers remain public-catalog prospects, and no customer record or relationship is invented.
+Verified existing canonical sender/customer binding is rechecked before exact
+conversation shadow import/promotion and the seven existing V2 capability grants.
+Opaque migration/rollout issuers retain descriptor binding, compatibility,
+quarantine and staff cutoff. Partial grant failures stay blocked and observable.
+
+The outgoing fence checks current policy/revision plus active fresh handling
+scope. Generic/prospect replies must target that account/external conversation and
+current external message; quotations require current-handling trusted canonical
+outbound intent. Old ambiguous intent is held, not automatically replayed. Policy
+revocation stops sends after an awaited model call. Inquiry startup skips outbound
+reconciliation and bypasses V3 dispatch; the controlled-test three-attempt quota is
+independent and is not a permanent business-message limit. All runtime failures
+remain fail-closed with bounded admission status and existing endpoint/audit trace.
+
+Activation target (after exact source review and CI): private Air DB policy for
+logical paired account demo-account, owner reference above, DRAFT boundary; host
+inquiryAccountId selects that registered account only, real demo gateway/Pi V2
+on, startup active, V3 off, no staff bootstrap, no controlled-test policy for
+regular customer responses. Each new verified conversation receives exact
+customer/account/conversation migration and seven capability rows, never guessed
+customer assignment/global default. Reviewed registration also covers these evidence-derived aliases, not guessed identity assignments. Persistent registration/activation must pass
+action-time review before executing. Settings exposes server provider/model/runtime
+and managed-gateway billing mode without keys or BYOK/OAuth/subscription setup.
