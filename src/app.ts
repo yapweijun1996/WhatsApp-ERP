@@ -1,3 +1,4 @@
+import {installControlledTestSendGuard,type ControlledTestSendPolicy} from './controlled-test-send-guard.js';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import Fastify from 'fastify';
 import fastifyStatic from '@fastify/static';
@@ -32,7 +33,7 @@ const STAFF_COOKIE = 'waerp_staff_session';
 const staffCookieSecure=()=>process.env.NODE_ENV==='production'?'; Secure':'';
 function parseCookies(header?: string): Record<string,string> { return Object.fromEntries((header??'').split(';').map(x=>x.trim()).filter(Boolean).map(x=>{const i=x.indexOf('=');return i<0?[x,'']:[x.slice(0,i),decodeURIComponent(x.slice(i+1))]})); }
 
-export function createApp(options: { dbFilename?: string; staffBootstrapCredential?: string; semanticAgentFactory?: OrderSemanticAgentFactory; demoDataset?: 'default'|'petshop'; startupMode?: 'active'|'paused'; prospectReplyScopes?:readonly ProspectReplyScope[]; pairingOwnerControl?:PairingOwnerControl; channel?:WhatsAppChannelAdapter } = {}) {
+export function createApp(options: { dbFilename?: string; staffBootstrapCredential?: string; semanticAgentFactory?: OrderSemanticAgentFactory; demoDataset?: 'default'|'petshop'; startupMode?: 'active'|'paused'; prospectReplyScopes?:readonly ProspectReplyScope[]; pairingOwnerControl?:PairingOwnerControl; channel?:WhatsAppChannelAdapter; controlledTest?: {sendPolicy?:ControlledTestSendPolicy} } = {}) {
   const app=Fastify({logger:false});
   const paused=options.startupMode==='paused';
   const requestedChannel=requestedTransportMode();
@@ -42,6 +43,7 @@ export function createApp(options: { dbFilename?: string; staffBootstrapCredenti
   const staffAuthority=createStaffCapabilityAuthority();
   const rolloutAuthority=createRolloutApprovalAuthority();
   const service=new CommerceService(new V1Database(options.dbFilename ?? process.env.ORDER_DB ?? 'order-intelligence.db',undefined,rolloutAuthority,options.demoDataset ?? (process.env.DEMO_DATASET === 'petshop' ? 'petshop' : 'default')),channel,staffAuthority.verify,options.semanticAgentFactory);
+  if(options.controlledTest)installControlledTestSendGuard(service.database,channel,options.controlledTest.sendPolicy);
   const rollout=new V2RolloutService(service.database,rolloutAuthority);
   const seams=createV1ServiceSeams(service);
   const demoConfig=demoGatewayConfig();

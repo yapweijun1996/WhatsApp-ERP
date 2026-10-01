@@ -689,3 +689,15 @@ CREATE TABLE IF NOT EXISTS prospect_reply_delivery(
  client_message_id TEXT NOT NULL UNIQUE,state TEXT NOT NULL CHECK(state IN ('CLAIMED','UNKNOWN','SUBMITTED','SUPPRESSED')),
  updated_at TEXT NOT NULL,PRIMARY KEY(account_id,external_message_id)
 );
+
+-- Opt-in host controlled-test provider attempts. No automatic reset/refund.
+CREATE TABLE IF NOT EXISTS controlled_test_send_budgets(
+ policy_id TEXT PRIMARY KEY,fingerprint TEXT NOT NULL,account_id TEXT NOT NULL,
+ conversation_id TEXT NOT NULL,recipient TEXT NOT NULL,used_attempts INTEGER NOT NULL CHECK(used_attempts BETWEEN 0 AND 3),
+ UNIQUE(account_id,recipient)
+);
+CREATE TABLE IF NOT EXISTS controlled_test_send_attempts(
+ policy_id TEXT NOT NULL REFERENCES controlled_test_send_budgets(policy_id),ordinal INTEGER NOT NULL CHECK(ordinal BETWEEN 1 AND 3),
+ client_message_id TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN ('UNKNOWN','SUBMITTED','FAILED')),attempted_at TEXT NOT NULL,
+ PRIMARY KEY(policy_id,ordinal)
+);
