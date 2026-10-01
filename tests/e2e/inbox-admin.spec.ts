@@ -20,3 +20,12 @@ test('empty, search-empty and retry states are truthful and clear previous conte
 test('no conversations does not invent messages, customers or order drafts',async({page})=>{
  await useInboxFixtures(page,{empty:true});await page.goto('/');await expect(page.locator('#inbox')).toContainText('No conversations yet');await expect(page.locator('#chat')).toContainText('Select a conversation');await expect(page.locator('#customerCard')).not.toContainText('Alpha');await expect(page.locator('#composerSend')).toBeDisabled();
 });
+
+test('SVG controls preserve accessible names, native keyboard activation and disclosure state',async({page})=>{
+ await useInboxFixtures(page);await page.goto('/');
+ for(const id of ['navInbox','navActivity','navSettings','headerSettings','detailsToggle','composerSend','chatBack','detailBack','closeDetails']){await expect(page.locator(`#${id} svg`)).toHaveAttribute('aria-hidden','true');await expect(page.locator(`#${id}`)).toHaveAttribute('aria-label',/.+/)}
+ const sprite=await page.request.get('/icons.svg');expect(sprite.ok()).toBe(true);expect(await sprite.text()).toContain('id="settings"');
+ await page.locator('#navSettings').focus();await page.keyboard.press('Enter');await expect(page.locator('#settingsView')).toBeVisible();await expect(page.locator('#regenerateQr')).toBeVisible();await page.locator('#navInbox').focus();await page.keyboard.press('Enter');await expect(page.locator('#chatPane')).toBeVisible();
+ const summary=page.locator('#doc summary');await expect(summary.locator('svg')).toBeVisible();await summary.focus();await page.keyboard.press('Enter');await expect(page.locator('#doc details')).toHaveAttribute('open','');
+ await page.screenshot({path:'../migration-evidence/svg-desktop.png',fullPage:true});await page.setViewportSize({width:390,height:844});await page.locator('[data-conversation-id="synthetic-alpha"]').click();await expect(page.locator('#chatPane')).toBeVisible();await page.screenshot({path:'../migration-evidence/svg-mobile.png',fullPage:true});
+});

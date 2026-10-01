@@ -7,3 +7,6 @@
 
 /* Readable secondary text; disabled controls remain explicit. */
 .eyebrow{color:#536f62}.item-preview,.item-status,.chat-title p,.customer-hero p,.detail-fields dt,.muted,.view-intro p,.trace-meta,.empty,.chat-empty{color:#607668}.item-line time{color:#60766b}.message-author{color:#4b7157}.message-time{color:#617a59}.composer textarea::placeholder{color:#718277;opacity:1}.composer p{color:#63796b}.order-line p{color:#637b6a}
+
+/* Local coherent SVG set; decorative graphics inherit the control label. */
+.ui-icon{display:inline-block;width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;vertical-align:middle;flex-shrink:0}.icon-button{display:inline-flex;align-items:center;justify-content:center}.nav-item>.ui-icon{width:24px;height:24px}.notice>.ui-icon{width:23px;height:23px}.search>.ui-icon{width:16px;height:16px}summary{list-style:none}summary::-webkit-details-marker{display:none}summary>.ui-icon{width:14px;height:14px;margin-right:5px;transition:transform .15s}details[open]>summary>.ui-icon{transform:rotate(90deg)}@media(prefers-reduced-motion:reduce){summary>.ui-icon{transition:none}}

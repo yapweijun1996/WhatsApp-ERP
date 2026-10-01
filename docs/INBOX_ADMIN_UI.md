@@ -11,3 +11,7 @@ Owner QR reuses the verified Access-session endpoint and private session handlin
 1,026 offline tests and 12 portable browser tests pass. Browser coverage includes desktop stale-response isolation, canonical customer/order selection, mobile back/history/focus and overflow, tablet context drawer, list error/retry/search/empty states, existing staff login, paused controls and owner QR status/retry. Two additional local captures compare the previous layout using the same marked synthetic fixtures. Typecheck, build, JavaScript syntax checks, diff checks and a redacted Gitleaks scan pass.
 
 No physical WhatsApp pairing, paid inference, production writes or outbound messages were tested. Publishing this UI does not enable processing; the protected origin must retain paused startup, disabled AI/V2 and blocked outbound.
+
+## Interface icons
+
+Owner preference: all interface icons use SVG. A local stroke/currentColor sprite replaces navigation, search, info, back, close, send and disclosure font glyphs. Icon-only controls retain accessible names; graphics are decorative and unfocusable. Brand initials, canonical customer avatars, QR images and message content are retained. This static-only change does not alter authentication, pairing, runtime processing or commerce.
