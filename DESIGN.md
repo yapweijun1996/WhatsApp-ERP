@@ -8,6 +8,8 @@ The product is **ERP Order Intelligence**, not a WhatsApp chatbot. WhatsApp is o
 
 AI autonomy ends at `SALES_ORDER.DRAFT`.
 
+Human chat access is separate from commercial authority. A `CHAT_ONLY` session may reply, take over and resume only explicitly approved account/conversation scopes; it cannot POST, confirm, progress DO or reset data. Existing broad staff remains compatible. See `docs/STAFF_CHAT_ACCESS.md` for the authorization and private owner handoff contract.
+
 ## Commercial interaction
 1. Customer sends natural language order/request.
 2. AI resolves customer, products, UOM, recent-order references, stock and customer pricing using ERP tools.
