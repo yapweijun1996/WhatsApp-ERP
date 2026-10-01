@@ -15,6 +15,8 @@ import {V2CanaryIngressRouter} from '../src/v2-canary-ingress-router.js';
 import {CommerceService} from '../src/commerce.js';
 import {createApp} from '../src/app.js';
 import {SimulatedChannel} from '../src/channels.js';
+import {spawnSync} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
 const scope={accountId:'demo-account',conversationId:'synthetic-staff-chat'};
 const ack={status:'submitted' as const,externalMessageId:'synthetic-provider-ack',submittedAt:new Date().toISOString()};
 function setup(file=':memory:',existing=false){
@@ -59,8 +61,8 @@ test('takeover may fence a busy AI turn but manual send and resume wait for the 
 test('audit or journal persistence failure atomically rolls back staff intent and makes zero provider calls',async()=>{
  for(const table of ['conversation_staff_events','conversation_reply_journal']){const x=setup();try{x.control.transition({...x.cmd(),action:'TAKEOVER'});x.db.db.exec(`CREATE TRIGGER synthetic_ignore BEFORE INSERT ON ${table} BEGIN SELECT RAISE(IGNORE); END`);let calls=0;await assert.rejects(x.control.send({...x.cmd('send',1),text:'Synthetic'}, {send:async()=>{calls++;return ack}}),/PERSISTENCE_REQUIRED/);assert.equal(calls,0);assert.equal((x.db.db.prepare('SELECT count(*) n FROM conversation_reply_journal').get() as any).n,0);assert.equal((x.db.db.prepare("SELECT count(*) n FROM conversation_staff_events WHERE action='SEND'").get() as any).n,0)}finally{x.db.db.close()}}
 });
-function inquirySetup(model:(text:string)=>Promise<string>,run?:(start:any,execute:any)=>Promise<any>){
- const migration=createMigrationApprovalAuthority(),approvals=createRolloutApprovalAuthority(),db=new V1Database(':memory:',migration,approvals);db.resetAndSeed();
+function inquirySetup(model:(text:string)=>Promise<string>,run?:(start:any,execute:any)=>Promise<any>,file=':memory:',existing=false){
+ const migration=createMigrationApprovalAuthority(),approvals=createRolloutApprovalAuthority(),db=new V1Database(file,migration,approvals);if(!existing)db.resetAndSeed();
  const registration={accountId:'demo-account',approvalRef:'synthetic-inquiry',subject:'synthetic-owner'},a=createAccountInquiryApprovalAuthority();registerAccountInquiryPolicy(db,registration,a.issue(registration),a);
  let controller!:AccountInquiryController;const staff=createStaffCapabilityAuthority(),capability=staff.issue('synthetic-staff'),control=new StaffConversationControl(db,staff.verify,{accountId:'demo-account',enabled:()=>true,inFlight:scope=>controller?.isInFlight(scope)??false});let calls=0;
  const channel={send:async()=>{calls++;return ack},connect:async()=>{},disconnect:async()=>{},getStatus:async()=> 'connected' as const,onMessage:()=>{}};
@@ -121,6 +123,27 @@ test('disconnected transport rejects a new manual intent but can still return an
   await assert.rejects(control.send(input,out),/CHANNEL_UNAVAILABLE/);assert.equal((x.db.db.prepare('SELECT count(*) n FROM conversation_reply_journal').get() as any).n,0);assert.equal(calls,0);
   connected=true;assert.equal((await control.send(input,out)).deliveryState,'SUBMITTED');connected=false;assert.equal((await control.send(input,out)).duplicate,true);assert.equal(calls,1);
  }finally{x.db.db.close()}
+});
+
+test('ignored human inbound/completion rolls back admission, survives restart and permits safe single redelivery',async()=>{
+ for(const fault of ['message','completion']){
+  const dir=mkdtempSync(join(tmpdir(),'waerp-staff-held-')),file=join(dir,'synthetic.db');let x=inquirySetup(async()=> 'Synthetic initial reply',undefined,file);
+  try{await x.controller.receiveFromChannel(x.incoming);const canonical=x.router.canonicalize(x.incoming)!,s={accountId:x.incoming.accountId,conversationId:canonical.message.conversationId};x.control.transition({...s,capability:x.capability,expectedRevision:0,idempotencyKey:'held-takeover',action:'TAKEOVER'});
+   const held={...x.incoming,externalMessageId:'synthetic-held-fault',occurredAt:new Date(Date.now()+10).toISOString()};
+   x.db.db.exec(fault==='message'?"CREATE TRIGGER synthetic_held_fault BEFORE INSERT ON messages WHEN NEW.external_message_id='synthetic-held-fault' BEGIN SELECT RAISE(IGNORE); END":"CREATE TRIGGER synthetic_held_fault BEFORE UPDATE ON account_inquiry_admissions WHEN NEW.external_message_id='synthetic-held-fault' AND NEW.state='COMPLETED' BEGIN SELECT RAISE(IGNORE); END");
+   await assert.rejects(x.controller.receiveFromChannel(held),/PERSISTENCE_REQUIRED/);assert.equal((x.db.db.prepare('SELECT count(*) n FROM account_inquiry_admissions WHERE external_message_id=?').get(held.externalMessageId) as any).n,0);assert.equal((x.db.db.prepare('SELECT count(*) n FROM messages WHERE external_message_id=?').get(held.externalMessageId) as any).n,0);assert.equal(x.controller.isInFlight(s),false);
+   x.db.db.close();x=inquirySetup(async()=>{throw Error('HELD_MODEL_FORBIDDEN')},undefined,file,true);x.db.db.exec('DROP TRIGGER synthetic_held_fault');
+   assert.equal((await x.controller.receiveFromChannel(held) as any).status,'STAFF_TAKEOVER_HELD');assert.equal((await x.controller.receiveFromChannel(held) as any).status,'INQUIRY_DUPLICATE_HELD');assert.equal((x.db.db.prepare('SELECT count(*) n FROM messages WHERE external_message_id=?').get(held.externalMessageId) as any).n,1);assert.equal((x.db.db.prepare('SELECT state FROM account_inquiry_admissions WHERE external_message_id=?').get(held.externalMessageId) as any).state,'COMPLETED');assert.equal(x.control.describe(s,x.capability).canSend,true);assert.equal(x.control.describe(s,x.capability).canResume,true);assert.equal(x.calls(),0);
+  }finally{x.db.db.close();rmSync(dir,{recursive:true,force:true})}
+ }
+});
+test('process crash after human admission but before inbound insert leaves no lost-message fence after SQLite recovery',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'waerp-staff-crash-')),file=join(dir,'synthetic.db');let x=inquirySetup(async()=> 'Synthetic initial reply',undefined,file);
+ try{await x.controller.receiveFromChannel(x.incoming);const c=x.router.canonicalize(x.incoming)!,s={accountId:x.incoming.accountId,conversationId:c.message.conversationId};x.control.transition({...s,capability:x.capability,expectedRevision:0,idempotencyKey:'crash-takeover',action:'TAKEOVER'});x.db.db.close();
+  const child=spawnSync(process.execPath,['--import','tsx',fileURLToPath(new URL('./fixtures/staff-held-crash.ts',import.meta.url)),file],{stdio:'ignore',timeout:10000});assert.equal(child.status,86);
+  x=inquirySetup(async()=>{throw Error('HELD_MODEL_FORBIDDEN')},undefined,file,true);assert.equal((x.db.db.prepare("SELECT count(*) n FROM account_inquiry_admissions WHERE external_message_id='synthetic-held-crash'").get() as any).n,0);assert.equal((x.db.db.prepare("SELECT count(*) n FROM messages WHERE external_message_id='synthetic-held-crash'").get() as any).n,0);assert.equal(x.controller.isInFlight(s),false);x.db.db.exec('DROP TRIGGER synthetic_crash');
+  const held={...x.incoming,externalMessageId:'synthetic-held-crash',occurredAt:new Date(Date.now()+10).toISOString()};assert.equal((await x.controller.receiveFromChannel(held) as any).status,'STAFF_TAKEOVER_HELD');assert.equal((await x.controller.receiveFromChannel(held) as any).status,'INQUIRY_DUPLICATE_HELD');assert.equal(x.control.describe(s,x.capability).canSend,true);assert.equal(x.control.describe(s,x.capability).canResume,true);assert.equal(x.calls(),0);assert.equal((x.db.db.prepare('PRAGMA integrity_check').get() as any).integrity_check,'ok');
+ }finally{try{x.db.db.close()}catch{}rmSync(dir,{recursive:true,force:true})}
 });
 
 test('enabled inquiry HTTP flow requires existing staff bootstrap and retains canonical scope for takeover/send/resume',async()=>{

@@ -64,25 +64,31 @@ export class AccountInquiryController {
     if(db.prepare('SELECT 1 FROM messages WHERE account_id=? AND external_message_id=?').get(input.accountId,input.externalMessageId))throw Error('INQUIRY_HISTORICAL_INPUT_DENIED');
     this.adoptExistingVerifiedPhoneAlias(input);
     const canonical=this.router.canonicalize(input)!;
-    const scope={accountId:input.accountId,conversationId:canonical.message.conversationId},control=this.staffControl?.snapshot(scope);
-    const value:Active={canonical,revision:p.revision,controlRevision:control?.revision??0,startedAt:new Date().toISOString()};
+    const scope={accountId:input.accountId,conversationId:canonical.message.conversationId};
+    const value:Active={canonical,revision:p.revision,controlRevision:0,startedAt:new Date().toISOString()};
     const claim=this.database.runImmediate(()=>{
       const current=this.policy();if(!current||current.revision!==p.revision)throw Error('INQUIRY_POLICY_CHANGED');
-      return db.prepare("INSERT OR IGNORE INTO account_inquiry_admissions(account_id,external_message_id,conversation_id,customer_id,policy_revision,occurred_at,admitted_at,state) VALUES(?,?,?,?,?,?,?,'ADMITTED')")
+      const control=this.staffControl?.snapshot(scope);value.controlRevision=control?.revision??0;
+      const inserted=db.prepare("INSERT OR IGNORE INTO account_inquiry_admissions(account_id,external_message_id,conversation_id,customer_id,policy_revision,occurred_at,admitted_at,state) VALUES(?,?,?,?,?,?,?,'ADMITTED')")
         .run(input.accountId,input.externalMessageId,canonical.message.conversationId,canonical.customerId,p.revision,input.occurredAt,value.startedAt).changes;
-    });
-    if(claim!==1){if(!db.prepare('SELECT 1 FROM account_inquiry_admissions WHERE account_id=? AND external_message_id=?').get(input.accountId,input.externalMessageId))throw Error('INQUIRY_ADMISSION_PERSISTENCE_REQUIRED');return {status:'INQUIRY_DUPLICATE_HELD'}}
-    if(control?.mode==='HUMAN'){
-      this.database.runImmediate(()=>{
+      if(inserted!==1){if(!db.prepare('SELECT 1 FROM account_inquiry_admissions WHERE account_id=? AND external_message_id=?').get(input.accountId,input.externalMessageId))throw Error('INQUIRY_ADMISSION_PERSISTENCE_REQUIRED');return {duplicate:true,humanHeld:false}}
+      if(control?.mode==='HUMAN'){
+        // Admission, visible inbound and terminal held disposition commit as one
+        // writer transaction. Failure/crash leaves no admission to block redelivery.
         const m=canonical.message;
         const written=db.prepare("INSERT INTO messages(id,conversation_id,external_message_id,direction,message_type,text,sender_external_id,sender_phone,reply_to_external_message_id,account_id,occurred_at,raw_ref,forwarding_json) VALUES(?,?,?,'INBOUND',?,?,?,?,?,?,?,?,?)")
           .run(randomUUID(),m.conversationId,m.externalMessageId,m.type,m.text??null,m.sender.externalId,m.sender.phone??null,m.replyToExternalMessageId??null,m.accountId,m.occurredAt,m.media?.externalRef??null,m.forwarding?JSON.stringify(m.forwarding):null);
-        if(written.changes!==1)throw Error('STAFF_CHAT_INBOUND_PERSISTENCE_REQUIRED');
+        const visible=db.prepare("SELECT text,sender_external_id FROM messages WHERE conversation_id=? AND account_id=? AND external_message_id=? AND direction='INBOUND'").get(m.conversationId,m.accountId,m.externalMessageId) as {text:string|null;sender_external_id:string}|undefined;
+        if(written.changes!==1||visible?.text!==(m.text??null)||visible?.sender_external_id!==m.sender.externalId)throw Error('STAFF_CHAT_INBOUND_PERSISTENCE_REQUIRED');
         db.prepare("UPDATE conversations SET last_message_at=CASE WHEN julianday(last_message_at) IS NULL OR julianday(last_message_at)<=julianday(?) THEN ? ELSE last_message_at END WHERE id=? AND channel_account_id=?").run(m.occurredAt,m.occurredAt,m.conversationId,m.accountId);
-        db.prepare("UPDATE account_inquiry_admissions SET state='COMPLETED',error_code='STAFF_TAKEOVER_HELD' WHERE account_id=? AND external_message_id=?").run(m.accountId,m.externalMessageId);
-      });
-      return {status:'STAFF_TAKEOVER_HELD',replySuppressed:true};
-    }
+        const completed=db.prepare("UPDATE account_inquiry_admissions SET state='COMPLETED',error_code='STAFF_TAKEOVER_HELD' WHERE account_id=? AND external_message_id=? AND state='ADMITTED'").run(m.accountId,m.externalMessageId);
+        if(completed.changes!==1||!db.prepare("SELECT 1 FROM account_inquiry_admissions WHERE account_id=? AND external_message_id=? AND conversation_id=? AND state='COMPLETED' AND error_code='STAFF_TAKEOVER_HELD'").get(m.accountId,m.externalMessageId,m.conversationId))throw Error('STAFF_CHAT_HELD_PERSISTENCE_REQUIRED');
+        return {duplicate:false,humanHeld:true};
+      }
+      return {duplicate:false,humanHeld:false};
+    });
+    if(claim.duplicate)return {status:'INQUIRY_DUPLICATE_HELD'};
+    if(claim.humanHeld)return {status:'STAFF_TAKEOVER_HELD',replySuppressed:true};
     const token=Object.freeze({});this.admissions.set(token,value);const key=this.key(input.accountId,input.externalMessageId);this.active.set(key,value);
     try{
       if(!this.verifyAdmission(token,canonical))throw Error('INQUIRY_POLICY_CHANGED');
