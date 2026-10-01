@@ -41,3 +41,10 @@ crash is also held for explicit review. A submitted result is provider submissio
 not physical receipt or exactly-once delivery. Recovery requires reviewed provider
 evidence; no timed retry, ledger deletion or global reset is authorized. This is a
 fail-closed availability tradeoff pending owner review before production release.
+
+Denied prospect intake, admission disposition and denial audit commit in one
+SQLite immediate transaction. Failed suppression/admission/audit rejects the
+request and rolls back that intake, permitting a retry while scope remains denied;
+no successful suppression is reported from nonterminal state. Historical denial
+audit is also a terminal fence for legacy inconsistent PENDING rows. Persistence
+failure is operationally unresolved, not an authorization or delivery success.

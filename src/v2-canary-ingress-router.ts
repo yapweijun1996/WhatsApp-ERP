@@ -124,39 +124,47 @@ export class V2CanaryIngressRouter {
     const identityState: IdentityState = canonical.identityState ?? 'UNKNOWN';
     const db = this.database.db;
 
-    // Persist inbound message without arrival_seq (no V2 queue for prospects).
-    const isDuplicate = db.prepare(
-      'SELECT 1 FROM messages WHERE account_id=? AND external_message_id=?'
-    ).get(message.accountId, message.externalMessageId);
+    // Intake, admission, denied disposition and its audit are one durable unit.
+    // Any persistence failure propagates; never report suppression from PENDING.
+    const admission=this.database.runImmediate(()=>{
+      // Persist inbound message without arrival_seq (no V2 queue for prospects).
+      const isDuplicate = db.prepare(
+        'SELECT 1 FROM messages WHERE account_id=? AND external_message_id=?'
+      ).get(message.accountId, message.externalMessageId);
 
-    if (!isDuplicate) {
-      db.prepare(
-        `INSERT OR IGNORE INTO messages(id,conversation_id,external_message_id,direction,message_type,text,
-         sender_external_id,sender_phone,reply_to_external_message_id,account_id,occurred_at,raw_ref,forwarding_json)
-         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`
-      ).run(
-        randomUUID(), message.conversationId, message.externalMessageId, 'INBOUND',
-        message.type, message.text ?? null, message.sender.externalId, message.sender.phone ?? null,
-        message.replyToExternalMessageId ?? null, message.accountId, message.occurredAt,
-        message.media?.externalRef ?? null, message.forwarding ? JSON.stringify(message.forwarding) : null
-      );
-    }
+      if (!isDuplicate) {
+        db.prepare(
+          `INSERT OR IGNORE INTO messages(id,conversation_id,external_message_id,direction,message_type,text,
+           sender_external_id,sender_phone,reply_to_external_message_id,account_id,occurred_at,raw_ref,forwarding_json)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`
+        ).run(
+          randomUUID(), message.conversationId, message.externalMessageId, 'INBOUND',
+          message.type, message.text ?? null, message.sender.externalId, message.sender.phone ?? null,
+          message.replyToExternalMessageId ?? null, message.accountId, message.occurredAt,
+          message.media?.externalRef ?? null, message.forwarding ? JSON.stringify(message.forwarding) : null
+        );
+      }
 
-    // Durable per-conversation arrival order for this prospect inbound. Recorded
-    // before any model call so a later reply decision can compare itself against
-    // provider arrival order rather than model completion order.
-    const inboundSeq = this.admitProspectInbound(message.accountId, message.conversationId, message.externalMessageId, message.occurredAt);
+      // Durable per-conversation arrival order for this prospect inbound. Recorded
+      // before any model call so a later reply decision can compare itself against
+      // provider arrival order rather than model completion order.
+      const inboundSeq = this.admitProspectInbound(message.accountId, message.conversationId, message.externalMessageId, message.occurredAt);
 
-    // A customer rollout is not prospect authorization. Fail closed before any
-    // model/catalog/abuse reply; preserve intake evidence without a historical send.
-    const destination=db.prepare('SELECT external_conversation_id FROM conversations WHERE id=? AND channel_account_id=?').get(message.conversationId,message.accountId) as {external_conversation_id:string}|undefined;
-    if(!destination||!this.prospectReplyScopeKeys.has(JSON.stringify([message.accountId,destination.external_conversation_id]))){
-      this.recordProspectReplyState(message.accountId,message.externalMessageId,'SUPPRESSED');
-      db.prepare(`INSERT INTO inbound_route_audit(id,account_id,conversation_id,external_message_id,identity_state,abuse_state,route_outcome,occurred_at)
-        SELECT ?,?,?,?,?,?,?,? WHERE NOT EXISTS(SELECT 1 FROM inbound_route_audit WHERE account_id=? AND external_message_id=? AND route_outcome='PROSPECT_OUTBOUND_SCOPE_REQUIRED')`)
-        .run(randomUUID(),message.accountId,message.conversationId,message.externalMessageId,identityState,'NOT_EVALUATED','PROSPECT_OUTBOUND_SCOPE_REQUIRED',message.occurredAt,message.accountId,message.externalMessageId);
-      return {status:'PROSPECT_PAUSED',identityState,routeOutcome:'PROSPECT_OUTBOUND_SCOPE_REQUIRED',replySuppressed:true,catalogCallCount:0,grounded:false,groundedProductIds:[]};
-    }
+      // A customer rollout is not prospect authorization. Fail closed before any
+      // model/catalog/abuse reply; preserve intake evidence without a historical send.
+      const destination=db.prepare('SELECT external_conversation_id FROM conversations WHERE id=? AND channel_account_id=?').get(message.conversationId,message.accountId) as {external_conversation_id:string}|undefined;
+      if(!destination||!this.prospectReplyScopeKeys.has(JSON.stringify([message.accountId,destination.external_conversation_id]))){
+        this.recordProspectReplyState(message.accountId,message.externalMessageId,'SUPPRESSED');
+        db.prepare(`INSERT INTO inbound_route_audit(id,account_id,conversation_id,external_message_id,identity_state,abuse_state,route_outcome,occurred_at)
+          SELECT ?,?,?,?,?,?,?,? WHERE NOT EXISTS(SELECT 1 FROM inbound_route_audit WHERE account_id=? AND external_message_id=? AND route_outcome='PROSPECT_OUTBOUND_SCOPE_REQUIRED')`)
+          .run(randomUUID(),message.accountId,message.conversationId,message.externalMessageId,identityState,'NOT_EVALUATED','PROSPECT_OUTBOUND_SCOPE_REQUIRED',message.occurredAt,message.accountId,message.externalMessageId);
+        return {denied:true,inboundSeq};
+      }
+
+      return {denied:false,inboundSeq};
+    });
+    const {inboundSeq}=admission;
+    if(admission.denied)return {status:'PROSPECT_PAUSED',identityState,routeOutcome:'PROSPECT_OUTBOUND_SCOPE_REQUIRED',replySuppressed:true,catalogCallCount:0,grounded:false,groundedProductIds:[]};
 
     // Durable single claim precedes every await. A crashed claim is held for
     // explicit review rather than retried: availability must not imply a send.
@@ -314,21 +322,19 @@ export class V2CanaryIngressRouter {
    * primary key is the provider message id, so a redelivery recovers its
    * original sequence instead of being admitted as newer traffic.
    *
-   * Returns undefined only if the row cannot be read back; the caller then skips
-   * the freshness fence, matching the fail-open posture of the cooldown guard.
+   * Missing or failed admission is a hard persistence error, never fail-open.
    */
-  private admitProspectInbound(accountId: string, conversationId: string, externalMessageId: string, occurredAt: string): number | undefined {
+  private admitProspectInbound(accountId: string, conversationId: string, externalMessageId: string, occurredAt: string): number {
     const db = this.database.db;
-    try {
-      db.prepare(
+    db.prepare(
         `INSERT OR IGNORE INTO prospect_reply_sequence(account_id,conversation_id,external_message_id,inbound_seq,admitted_at,reply_state)
          SELECT ?,?,?,COALESCE((SELECT MAX(inbound_seq) FROM prospect_reply_sequence WHERE account_id=? AND conversation_id=?),0)+1,?,'PENDING'`
       ).run(accountId, conversationId, externalMessageId, accountId, conversationId, occurredAt);
-    } catch { /* ordering evidence is best-effort; read-back below decides */ }
     const row = db.prepare(
       'SELECT inbound_seq FROM prospect_reply_sequence WHERE account_id=? AND external_message_id=? AND conversation_id=?'
     ).get(accountId, externalMessageId, conversationId) as { inbound_seq: number } | undefined;
-    return row?.inbound_seq;
+    if(!row)throw Error('PROSPECT_ADMISSION_PERSISTENCE_REQUIRED');
+    return row.inbound_seq;
   }
 
   /**
@@ -361,16 +367,16 @@ export class V2CanaryIngressRouter {
     const row = this.database.db.prepare(
       'SELECT reply_state FROM prospect_reply_sequence WHERE account_id=? AND external_message_id=?'
     ).get(accountId, externalMessageId) as { reply_state: string } | undefined;
-    return row?.reply_state === 'SENT' || row?.reply_state === 'SUPPRESSED';
+    return row?.reply_state === 'SENT' || row?.reply_state === 'SUPPRESSED' || Boolean(this.database.db.prepare("SELECT 1 FROM inbound_route_audit WHERE account_id=? AND external_message_id=? AND route_outcome='PROSPECT_OUTBOUND_SCOPE_REQUIRED' LIMIT 1").get(accountId,externalMessageId));
   }
 
   /** Durable disposition of this inbound's reply. Only a PENDING admission moves. */
   private recordProspectReplyState(accountId: string, externalMessageId: string, state: 'SENT' | 'SUPPRESSED'): void {
-    try {
-      this.database.db.prepare(
+    this.database.db.prepare(
         "UPDATE prospect_reply_sequence SET reply_state=? WHERE account_id=? AND external_message_id=? AND reply_state='PENDING'"
       ).run(state, accountId, externalMessageId);
-    } catch { /* disposition evidence is diagnostic only */ }
+    const persisted=this.database.db.prepare('SELECT reply_state FROM prospect_reply_sequence WHERE account_id=? AND external_message_id=?').get(accountId,externalMessageId) as {reply_state:string}|undefined;
+    if(!persisted || !['SENT','SUPPRESSED'].includes(persisted.reply_state))throw Error('PROSPECT_DISPOSITION_PERSISTENCE_REQUIRED');
   }
 
   /**

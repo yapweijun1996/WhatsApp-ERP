@@ -62,3 +62,22 @@ test('crash after provider submission before disposition leaves UNKNOWN and neve
  x.db.db.exec('DROP TRIGGER synthetic_crash_before_disposition');await new V2CanaryIngressRouter(x.db,new CommerceService(x.db),x.rollout,options).receive(message());assert.equal(sends,1);
  }finally{x.db.db.close()}
 });
+
+test('denial suppression persistence failure rejects and rolls back intake; retry commits terminal denial',async()=>{
+ const x=setup();try{const m=message();x.db.db.exec("CREATE TRIGGER synthetic_suppression_failure BEFORE UPDATE ON prospect_reply_sequence WHEN NEW.reply_state='SUPPRESSED' BEGIN SELECT RAISE(ABORT,'SYNTHETIC_SUPPRESSION_FAILURE'); END");
+ await assert.rejects(x.router.receive(m),/SYNTHETIC_SUPPRESSION_FAILURE/);
+ assert.equal((x.db.db.prepare('SELECT count(*) n FROM messages WHERE account_id=? AND external_message_id=?').get(m.accountId,m.externalMessageId) as any).n,0);assert.equal((x.db.db.prepare('SELECT count(*) n FROM prospect_reply_sequence').get() as any).n,0);assert.equal((x.db.db.prepare('SELECT count(*) n FROM inbound_route_audit').get() as any).n,0);assert.deepEqual(x.counts(),{models:0,sends:0,reads:0});
+ x.db.db.exec('DROP TRIGGER synthetic_suppression_failure');const retry=await x.router.receive(m) as any;assert.equal(retry.replySuppressed,true);assert.equal((x.db.db.prepare('SELECT reply_state FROM prospect_reply_sequence').get() as any).reply_state,'SUPPRESSED');
+ let sends=0,models=0;await new V2CanaryIngressRouter(x.db,new CommerceService(x.db),x.rollout,{enabled:true,prospectReplyScopes:[{accountId:m.accountId,externalConversationId:m.conversationId}],outbound:{send:async()=>{sends++;return{status:'submitted'}}} as any,prospectModel:async()=>{models++;return 'Synthetic'}}).receive(m);assert.equal(sends,0);assert.equal(models,0);
+ }finally{x.db.db.close()}
+});
+test('denial audit failure atomically rolls back suppressed disposition and inbound',async()=>{
+ const x=setup();try{x.db.db.exec("CREATE TRIGGER synthetic_denial_audit_failure BEFORE INSERT ON inbound_route_audit WHEN NEW.route_outcome='PROSPECT_OUTBOUND_SCOPE_REQUIRED' BEGIN SELECT RAISE(ABORT,'SYNTHETIC_DENIAL_AUDIT_FAILURE'); END");await assert.rejects(x.router.receive(message()),/SYNTHETIC_DENIAL_AUDIT_FAILURE/);assert.equal((x.db.db.prepare('SELECT count(*) n FROM prospect_reply_sequence').get() as any).n,0);assert.equal((x.db.db.prepare('SELECT count(*) n FROM messages WHERE external_message_id=?').get('scope-1') as any).n,0);assert.deepEqual(x.counts(),{models:0,sends:0,reads:0})}finally{x.db.db.close()}
+});
+
+test('legacy PENDING with denial audit remains terminal after later prospect authorization',async()=>{
+ const x=setup();try{const m=message();await x.router.receive(m);x.db.db.prepare("UPDATE prospect_reply_sequence SET reply_state='PENDING'").run();let models=0,sends=0;await new V2CanaryIngressRouter(x.db,new CommerceService(x.db),x.rollout,{enabled:true,prospectReplyScopes:[{accountId:m.accountId,externalConversationId:m.conversationId}],prospectModel:async()=>{models++;return 'Synthetic'},outbound:{send:async()=>{sends++;return{status:'submitted'}}} as any}).receive(m);assert.equal(models,0);assert.equal(sends,0);assert.equal((x.db.db.prepare("SELECT count(*) n FROM inbound_route_audit WHERE route_outcome='PROSPECT_OUTBOUND_SCOPE_REQUIRED'").get() as any).n,1)}finally{x.db.db.close()}
+});
+test('silently ignored suppression update cannot report successful denial',async()=>{
+ const x=setup();try{x.db.db.exec("CREATE TRIGGER synthetic_ignored_suppression BEFORE UPDATE ON prospect_reply_sequence WHEN NEW.reply_state='SUPPRESSED' BEGIN SELECT RAISE(IGNORE); END");await assert.rejects(x.router.receive(message()),/PROSPECT_DISPOSITION_PERSISTENCE_REQUIRED/);assert.equal((x.db.db.prepare('SELECT count(*) n FROM prospect_reply_sequence').get() as any).n,0);assert.deepEqual(x.counts(),{models:0,sends:0,reads:0})}finally{x.db.db.close()}
+});
