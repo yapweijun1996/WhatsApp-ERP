@@ -14,7 +14,7 @@ async function sendMessage(page: Page, text: string) {
 }
 
 test('Legacy simulated fallback fails closed and preserves AI/staff boundary', async ({ page, request }) => {
-  await page.goto('/');
+  await page.goto('/');await page.locator('#navSettings').click();
   await page.setExtraHTTPHeaders({ authorization: 'Bearer test-only-high-entropy-bootstrap' });
   await clickAndWait(page, '#reset', '/api/reset');
   await expect(page.locator('#authority')).toContainText('V1_ONLY');
@@ -24,7 +24,7 @@ test('Legacy simulated fallback fails closed and preserves AI/staff boundary', a
   // The offline legacy fallback deliberately has no semantic classifier. It must
   // not infer business intent from wording when a real model is unavailable.
   await sendMessage(page, 'Hi, same as last week. Ayam 10 ctn, red one 5 ctn. Tomorrow deliver can?');
-  await expect(page.locator('#inbox')).toContainText('Hi, same as last week. Ayam 10 ctn, red one 5 ctn. Tomorrow deliver can?');
+  await expect(page.locator('#chat')).toContainText('Hi, same as last week. Ayam 10 ctn, red one 5 ctn. Tomorrow deliver can?');
   await expect(page.locator('#doc')).toContainText('No quotation yet.');
   await expect(page.locator('#so')).toContainText('No Draft Sales Order yet.');
   for (const label of ['Customer message received', 'Context loaded', 'Customer reply sent']) {

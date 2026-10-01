@@ -24,6 +24,7 @@ import { V3LiveCanaryBridge } from './v3-live-canary-bridge.js';
 import { createV3CanaryComposition, createV3CanaryRuntimeRunner } from './v3-canary-runtime-composition.js';
 import { createProspectModelCaller } from './v2-prospect-model-caller.js';
 
+import {listConversations,selectedConversation} from './conversation-view.js';
 import {pairingOwnerControlFromEnv,type PairingOwnerControl} from './pairing-owner-auth.js';
 
 const STAFF_COOKIE = 'waerp_staff_session';
@@ -119,8 +120,23 @@ export function createApp(options: { dbFilename?: string; staffBootstrapCredenti
     catch{return reply.code(503).send({error:'PAIRING_CONNECT_FAILED'})}
     finally{pairingPending=false}
   });
-  app.get('/api/state',async(req:any)=>{const conversationId=isQr?service.latestConversationId():'conv-001';const state={...service.state(conversationId),operational:{...runtimeTelemetry(),agentRuntime:piHarness?'pi-harness':'legacy-or-disabled'},v3Shadow:v3Shadow.telemetry({accountId:'demo-account',conversationId})};const s=session(req);return s?{...state,rollout:rollout.telemetry({accountId:'demo-account',conversationId})}:{...state,rollout:{detail:'STAFF_SESSION_REQUIRED'}}});
-  app.get('/api/agent-trace',async()=>projectAgentTrace(service.database.db,'demo-account',isQr?service.latestConversationId():'conv-001'));
+  const currentAccountId=()=>isQr?(channel as QrDemoAdapter).getStatusInfo().accountId:'demo-account';
+  app.get('/api/conversations',async(_,reply)=>{reply.header('cache-control','no-store');return {conversations:listConversations(service.database.db,currentAccountId())}});
+  const selection=(req:any)=>{
+    const accountId=currentAccountId();const requested=req.query?.conversationId;
+    if(requested!==undefined&&(typeof requested!=='string'||!requested||requested.length>200))return undefined;
+    const id=requested??(listConversations(service.database.db,accountId)[0] as {id:string}|undefined)?.id;
+    return id?selectedConversation(service.database.db,accountId,id):undefined;
+  };
+  app.get('/api/state',async(req:any,reply)=>{
+    reply.header('cache-control','no-store');const selected=selection(req);
+    if(!selected)return reply.code(404).send({error:'CONVERSATION_NOT_FOUND'});
+    const conversationId=selected.id,accountId=selected.accountId;
+    const messages=(service.database.db.prepare('SELECT id,direction,text,message_type messageType,occurred_at occurredAt FROM messages WHERE conversation_id=? AND account_id=? ORDER BY rowid').all(conversationId,accountId) as any[]).map(m=>({...m,from:m.direction==='INBOUND'?'customer':'ai'}));
+    const state={...service.state(conversationId),messages,phone:selected.phone??'',conversation:selected,operational:{...runtimeTelemetry(),startupMode:paused?'paused':'active',agentRuntime:piHarness?'pi-harness':'legacy-or-disabled'},v3Shadow:v3Shadow.telemetry({accountId,conversationId})};const s=session(req);
+    return s?{...state,rollout:rollout.telemetry({accountId,conversationId})}:{...state,rollout:{detail:'STAFF_SESSION_REQUIRED'}}
+  });
+  app.get('/api/agent-trace',async(req:any,reply)=>{reply.header('cache-control','no-store');const selected=selection(req);if(!selected)return reply.code(404).send({error:'CONVERSATION_NOT_FOUND'});return projectAgentTrace(service.database.db,selected.accountId,selected.id)});
   app.get('/api/agent-harness',async()=>piHarness?piHarness.describe():{engine:'disabled',role:null,skills:[],tools:[],authority:'NONE'});
   app.post('/api/simulated/inbound',async(req:any)=>{await startupReady;const b=req.body??{};const input={channel:'whatsapp' as const,accountId:'demo-account',externalMessageId:b.externalMessageId??`api-${Date.now()}-${randomBytes(3).toString('hex')}`,conversationId:'conv-001',sender:{externalId:'+6591110001',phone:'+6591110001'},type:b.type??'text',text:b.text,occurredAt:new Date().toISOString()};return receiveWithShadow(input)});
   app.get('/api/staff/session',async req=>{const s=session(req);return{authenticated:Boolean(s),subject:s?.subject??null}});

@@ -6,7 +6,7 @@ test('owner regenerates once with pending state; disconnected stale QR hidden an
  await page.route('**/health',r=>r.fulfill({json:{startupMode:'paused'}}));
  await page.route('**/api/channel/status',r=>r.fulfill({json:status}));
  await page.route('**/api/channel/pairing',async r=>{requests++;expect(r.request().headers()['x-waerp-pairing-action']).toBe('regenerate');expect(r.request().postData()).toBe('{}');await new Promise<void>(done=>release=done);status={...base,status:'connecting',qrReady:true,qr:pixel,qrExpiresAt:new Date(Date.now()+55000).toISOString()};await r.fulfill({json:{...status,pairingRequested:true}})});
- await page.goto('/');await expect(page.locator('#pairingControls')).toBeVisible();await expect(page.locator('#channel img')).toHaveCount(0);
+ await page.goto('/');await page.locator('#navSettings').click();await expect(page.locator('#pairingControls')).toBeVisible();await expect(page.locator('#channel img')).toHaveCount(0);
  await page.locator('#regenerateQr').click();await expect(page.locator('#regenerateQr')).toBeDisabled();await expect(page.locator('#pairingFeedback')).toContainText('Processing stays paused');expect(requests).toBe(1);
  release!();await expect(page.locator('#channel img')).toBeVisible();await expect(page.locator('#migrationBanner')).toBeVisible();await expect(page.locator('#send')).toBeDisabled();
 });
@@ -14,6 +14,6 @@ test('owner sees fixed connection error, can retry, then paired status never off
  await page.clock.install();let status:any={...base,status:'disconnected',qrReady:false,qr:null};let requests=0;
  await page.route('**/health',r=>r.fulfill({json:{startupMode:'paused'}}));await page.route('**/api/channel/status',r=>r.fulfill({json:status}));
  await page.route('**/api/channel/pairing',async r=>{requests++;if(requests===1){await r.fulfill({status:503,json:{error:'PAIRING_CONNECT_FAILED'}});return}status={...base,status:'connected',qrReady:false,qr:null};await r.fulfill({json:status})});
- await page.goto('/');await page.locator('#regenerateQr').click();await expect(page.locator('#pairingFeedback')).toContainText('Connection failed');await expect(page.locator('#regenerateQr')).toBeDisabled();
- await page.clock.fastForward(6500);await expect(page.locator('#regenerateQr')).toBeEnabled();await page.locator('#regenerateQr').click();await expect(page.locator('#channel')).toContainText('Account paired');await expect(page.locator('#regenerateQr')).toBeDisabled();await expect(page.locator('#channel img')).toHaveCount(0);expect(requests).toBe(2);
+ await page.goto('/');await page.locator('#navSettings').click();await page.locator('#regenerateQr').click();await expect(page.locator('#pairingFeedback')).toContainText('Connection failed');await expect(page.locator('#regenerateQr')).toBeDisabled();
+ await page.clock.fastForward(8000);await expect(page.locator('#regenerateQr')).toBeEnabled();await page.locator('#regenerateQr').click();await expect(page.locator('#channel')).toContainText('Account paired');await expect(page.locator('#regenerateQr')).toBeDisabled();await expect(page.locator('#channel img')).toHaveCount(0);expect(requests).toBe(2);
 });

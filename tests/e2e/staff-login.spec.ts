@@ -9,7 +9,7 @@ test('staff bootstrap is sent only in the login header and cleared on failure an
       await route.fulfill({status:401,contentType:'application/json',body:JSON.stringify({error:fixture})});
     } else await route.fulfill({contentType:'application/json',body:'{"authenticated":false,"subject":null}'});
   });
-  await page.goto('/');
+  await page.goto('/');await page.locator('#navSettings').click();
   await page.locator('#staffLogin').click();
   await expect(page.locator('#staffBootstrap')).toHaveAttribute('type','password');
   await page.locator('#staffBootstrap').fill(fixture);
@@ -34,7 +34,7 @@ test('successful intercepted login closes the dialog and discards the credential
     }
     await route.fulfill({contentType:'application/json',body:JSON.stringify({authenticated:submitted,subject:submitted?'test-fixture':null})});
   });
-  await page.goto('/');
+  await page.goto('/');await page.locator('#navSettings').click();
   await page.locator('#staffLogin').click();
   await page.locator('#staffBootstrap').fill('test-only-ui-success');
   await page.locator('#staffLoginSubmit').click();
