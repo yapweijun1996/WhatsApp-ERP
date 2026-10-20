@@ -1,3 +1,4 @@
+import {resolveVerifiedCustomerId} from './v2-identity-resolver.js';
 import {createHash,randomUUID} from 'node:crypto'; import type Database from 'better-sqlite3';
 import {V1Database} from './database.js'; import {DemoErpAdapter,type Evidence} from './erp.js'; import type {IncomingChannelMessage,WhatsAppChannelAdapter} from './channels.js';
 import { OutboundMessageService } from './outbound-message-service.js';
@@ -105,20 +106,11 @@ export class CommerceService{
   let conversation=this.db.prepare('SELECT * FROM conversations WHERE id=? AND channel_account_id=?').get(m.conversationId,m.accountId) as any;
   if(!conversation)conversation=this.db.prepare('SELECT * FROM conversations WHERE channel_account_id=? AND external_conversation_id=?').get(m.accountId,m.conversationId) as any;
 
-  let identity=conversation?.customer_id
-    ? this.db.prepare('SELECT c.*,i.external_id,i.phone FROM customer_channel_identities i JOIN customers c ON c.id=i.customer_id WHERE i.channel_account_id=? AND i.external_id=? AND i.customer_id=?').get(m.accountId,m.sender.externalId,conversation.customer_id) as any
+  const resolvedCustomerId=resolveVerifiedCustomerId(this.db,m);
+  // An existing conversation never changes customer from sender/config alone.
+  const identity=resolvedCustomerId&&(!conversation?.customer_id||conversation.customer_id===resolvedCustomerId)
+    ? this.db.prepare('SELECT c.*,i.external_id,i.phone FROM customer_channel_identities i JOIN customers c ON c.id=i.customer_id WHERE i.channel_account_id=? AND i.external_id=? AND i.customer_id=?').get(m.accountId,m.sender.externalId,resolvedCustomerId) as any
     : undefined;
-
-  const configuredPhone=normalizePhone(process.env.WHATSAPP_QR_CUSTOMER_PHONE);
-  if(!identity&&m.sender.phone&&configuredPhone&&m.sender.phone===configuredPhone){
-    const customerId=process.env.WHATSAPP_QR_CUSTOMER_ID??'CUST-001';
-    const customer=this.db.prepare('SELECT id FROM customers WHERE id=?').get(customerId) as any;
-    if(customer){
-      const identityId=`qr-${createHash('sha256').update(`${m.accountId}|${m.sender.externalId}`).digest('hex').slice(0,24)}`;
-      this.db.prepare('INSERT OR IGNORE INTO customer_channel_identities VALUES(?,?,?,?,?,?)').run(identityId,customerId,m.accountId,'whatsapp',m.sender.externalId,m.sender.phone);
-      identity=this.db.prepare('SELECT c.*,i.external_id,i.phone FROM customer_channel_identities i JOIN customers c ON c.id=i.customer_id WHERE i.channel_account_id=? AND i.external_id=?').get(m.accountId,m.sender.externalId) as any;
-    }
-  }
 
   if(!conversation){
     const id=`conv-${createHash('sha256').update(`${m.accountId}|${m.conversationId}`).digest('hex').slice(0,24)}`;

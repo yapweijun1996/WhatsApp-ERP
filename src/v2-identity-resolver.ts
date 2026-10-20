@@ -12,6 +12,41 @@ export interface IdentityResolution {
   readonly prospectId: string | null;
 }
 
+/** Shared canonical binding lookup. No default customer; prospect tracking stays with the resolver. */
+export function resolveVerifiedCustomerId(db:Database.Database,input:IncomingChannelMessage):string|null {
+    // 1. Existing verified binding in customer_channel_identities.
+    const identity = db.prepare(
+      'SELECT customer_id, channel FROM customer_channel_identities WHERE channel_account_id=? AND external_id=?'
+    ).get(input.accountId, input.sender.externalId) as { customer_id: string; channel: string } | undefined;
+
+    if (identity) {
+      if (identity.channel !== input.channel) throw Error('V2_CANONICAL_CHANNEL_CONFLICT');
+      return identity.customer_id;
+    }
+
+    // 2. Deterministic canonical evidence: env-configured phone binding.
+    // BOTH WHATSAPP_QR_CUSTOMER_PHONE and WHATSAPP_QR_CUSTOMER_ID must be explicitly set.
+    // Missing customer ID never implies CUST-001 or any default.
+    const phone = (input.sender.phone ?? '').replace(/\D/g, '');
+    const configuredPhone = (process.env.WHATSAPP_QR_CUSTOMER_PHONE ?? '').replace(/\D/g, '');
+    const configuredCustomerId = process.env.WHATSAPP_QR_CUSTOMER_ID;
+    if (phone && configuredPhone && phone === configuredPhone && configuredCustomerId) {
+      if (db.prepare('SELECT id FROM customers WHERE id=?').get(configuredCustomerId)) {
+        const identityId = `qr-${createHash('sha256').update(`${input.accountId}|${input.sender.externalId}`).digest('hex').slice(0, 24)}`;
+        db.prepare('INSERT OR IGNORE INTO customer_channel_identities VALUES(?,?,?,?,?,?)')
+          .run(identityId, configuredCustomerId, input.accountId, input.channel, input.sender.externalId, input.sender.phone ?? null);
+        const committed = db.prepare(
+          'SELECT customer_id, channel FROM customer_channel_identities WHERE channel_account_id=? AND external_id=?'
+        ).get(input.accountId, input.sender.externalId) as { customer_id: string; channel: string } | undefined;
+        if (!committed || committed.channel !== input.channel) throw Error('V2_CANONICAL_CHANNEL_CONFLICT');
+        if (committed.customer_id !== configuredCustomerId) throw Error('V2_CANONICAL_IDENTITY_CONFLICT');
+        return configuredCustomerId;
+      }
+    }
+
+    return null;
+}
+
 /**
  * Evidence-based identity resolver. UNKNOWN and PROSPECT are additive states
  * that never create customer bindings. Only deterministic canonical evidence
@@ -22,35 +57,8 @@ export class IdentityResolver {
   constructor(private readonly db: Database.Database) {}
 
   resolve(input: IncomingChannelMessage): IdentityResolution {
-    // 1. Existing verified binding in customer_channel_identities.
-    const identity = this.db.prepare(
-      'SELECT customer_id, channel FROM customer_channel_identities WHERE channel_account_id=? AND external_id=?'
-    ).get(input.accountId, input.sender.externalId) as { customer_id: string; channel: string } | undefined;
-
-    if (identity) {
-      if (identity.channel !== input.channel) throw Error('V2_CANONICAL_CHANNEL_CONFLICT');
-      return { identityState: 'VERIFIED_CUSTOMER', customerId: identity.customer_id, prospectId: null };
-    }
-
-    // 2. Deterministic canonical evidence: env-configured phone binding.
-    // BOTH WHATSAPP_QR_CUSTOMER_PHONE and WHATSAPP_QR_CUSTOMER_ID must be explicitly set.
-    // Missing customer ID never implies CUST-001 or any default.
-    const phone = (input.sender.phone ?? '').replace(/\D/g, '');
-    const configuredPhone = (process.env.WHATSAPP_QR_CUSTOMER_PHONE ?? '').replace(/\D/g, '');
-    const configuredCustomerId = process.env.WHATSAPP_QR_CUSTOMER_ID;
-    if (phone && configuredPhone && phone === configuredPhone && configuredCustomerId) {
-      if (this.db.prepare('SELECT id FROM customers WHERE id=?').get(configuredCustomerId)) {
-        const identityId = `qr-${createHash('sha256').update(`${input.accountId}|${input.sender.externalId}`).digest('hex').slice(0, 24)}`;
-        this.db.prepare('INSERT OR IGNORE INTO customer_channel_identities VALUES(?,?,?,?,?,?)')
-          .run(identityId, configuredCustomerId, input.accountId, input.channel, input.sender.externalId, input.sender.phone ?? null);
-        const committed = this.db.prepare(
-          'SELECT customer_id, channel FROM customer_channel_identities WHERE channel_account_id=? AND external_id=?'
-        ).get(input.accountId, input.sender.externalId) as { customer_id: string; channel: string } | undefined;
-        if (!committed || committed.channel !== input.channel) throw Error('V2_CANONICAL_CHANNEL_CONFLICT');
-        if (committed.customer_id !== configuredCustomerId) throw Error('V2_CANONICAL_IDENTITY_CONFLICT');
-        return { identityState: 'VERIFIED_CUSTOMER', customerId: configuredCustomerId, prospectId: null };
-      }
-    }
+    const verifiedCustomerId=resolveVerifiedCustomerId(this.db,input);
+    if(verifiedCustomerId)return {identityState:'VERIFIED_CUSTOMER',customerId:verifiedCustomerId,prospectId:null};
 
     // 3. No verified binding: track as prospect (UNKNOWN on first contact, PROSPECT thereafter).
     const now = new Date().toISOString();
