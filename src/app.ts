@@ -27,8 +27,9 @@ import { createProspectModelCaller } from './v2-prospect-model-caller.js';
 const STAFF_COOKIE = 'waerp_staff_session';
 function parseCookies(header?: string): Record<string,string> { return Object.fromEntries((header??'').split(';').map(x=>x.trim()).filter(Boolean).map(x=>{const i=x.indexOf('=');return i<0?[x,'']:[x.slice(0,i),decodeURIComponent(x.slice(i+1))]})); }
 
-export function createApp(options: { dbFilename?: string; staffBootstrapCredential?: string; semanticAgentFactory?: OrderSemanticAgentFactory; demoDataset?: 'default'|'petshop' } = {}) {
+export function createApp(options: { dbFilename?: string; staffBootstrapCredential?: string; semanticAgentFactory?: OrderSemanticAgentFactory; demoDataset?: 'default'|'petshop'; startupMode?: 'active'|'paused' } = {}) {
   const app=Fastify({logger:false});
+  const paused=options.startupMode==='paused';
   const requestedChannel=requestedTransportMode();
   const isQr=requestedChannel==='whatsapp-qr';
   const channel: WhatsAppChannelAdapter = requestedChannel==='simulated' ? new SimulatedChannel() : isQr ? new QrDemoAdapter() : new UnsupportedChannel(requestedChannel);
@@ -81,8 +82,8 @@ export function createApp(options: { dbFilename?: string; staffBootstrapCredenti
   service.ensureSeeded();
   // Channel delivery may begin while an async adapter is connecting. Gate both
   // inbound delivery and the simulated route on recovery completing first.
-  const startupReady = channel.connect().then(async () => { await service.reconcileOutbound(); }).catch(error => { app.log.error({err:error},'channel startup failed'); throw error; });
-  channel.onMessage(async message=>{try{await startupReady;await receiveWithShadow(message)}catch(error){app.log.error({err:error},'channel inbound failed')}});
+  const startupReady = (paused ? Promise.resolve() : channel.connect().then(async () => { await service.reconcileOutbound(); }).catch(error => { app.log.error({err:error},'channel startup failed'); throw error; }));
+  channel.onMessage(async message=>{if(paused)return;try{await startupReady;await receiveWithShadow(message)}catch(error){app.log.error({err:error},'channel inbound failed')}});
   const staffSessions=new Map<string,{subject:string;expiresAt:number;capability:StaffCapability}>();
   const bootstrapCredential=options.staffBootstrapCredential ?? process.env.STAFF_BOOTSTRAP_CREDENTIAL;
   const validBootstrap=(req:any)=>{
@@ -96,7 +97,8 @@ export function createApp(options: { dbFilename?: string; staffBootstrapCredenti
   const root=join(fileURLToPath(new URL('.',import.meta.url)),'../public');
   app.register(fastifyStatic,{root});
   app.get('/',async(_,r)=>r.sendFile('index.html'));
-  app.get('/health',async()=>{const operational=runtimeTelemetry();const channel=process.env.ORDER_CHANNEL??process.env.WHATSAPP_CHANNEL??'simulated';return{ok:true,channel,...operational,agentRuntime:piHarness?'pi-harness':'legacy-or-disabled',rollout:{v2Traffic:'OFF',v3Shadow:'PROPOSED'}}});
+  app.addHook('onRequest',async(req,reply)=>{if(paused&&['POST','PUT','PATCH','DELETE'].includes(req.method))return reply.code(503).send({error:'MIGRATION_RUNTIME_PAUSED'})});
+  app.get('/health',async()=>{const operational=runtimeTelemetry();const channel=process.env.ORDER_CHANNEL??process.env.WHATSAPP_CHANNEL??'simulated';return{ok:true,startupMode:paused?'paused':'active',channel,...operational,agentRuntime:piHarness?'pi-harness':'legacy-or-disabled',rollout:{v2Traffic:'OFF',v3Shadow:'PROPOSED'}}});
   if (process.env.NODE_ENV === 'test' && process.env.V2_EVAL_002_SURFACE === '1') app.get('/api/test-only/v2-eval-002', async () => runV2Eval002());
   app.get('/api/channel/status',async()=>('getStatusInfo' in channel ? (channel as any).getStatusInfo() : {status:await channel.getStatus(),mode:'simulated',adapter:'WhatsAppChannelAdapter',qrReady:false,qr:null}));
   app.get('/api/state',async(req:any)=>{const conversationId=isQr?service.latestConversationId():'conv-001';const state={...service.state(conversationId),operational:{...runtimeTelemetry(),agentRuntime:piHarness?'pi-harness':'legacy-or-disabled'},v3Shadow:v3Shadow.telemetry({accountId:'demo-account',conversationId})};const s=session(req);return s?{...state,rollout:rollout.telemetry({accountId:'demo-account',conversationId})}:{...state,rollout:{detail:'STAFF_SESSION_REQUIRED'}}});
